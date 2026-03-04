@@ -1,323 +1,209 @@
 mod ipc;
 mod sidecar;
-mod stream;
 
-use ipc::EngineConnection;
-use stream::StreamEvent;
+use ipc::PiConnection;
 use std::sync::Arc;
-use tauri::ipc::Channel;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 pub struct AppState {
-    pub engine: Arc<Mutex<Option<EngineConnection>>>,
+    pub pi: Arc<Mutex<Option<PiConnection>>>,
     pub workspace_root: Arc<Mutex<Option<String>>>,
-    /// Keep the engine child process alive (kill_on_drop).
-    pub _engine_child: Arc<Mutex<Option<tokio::process::Child>>>,
+    pub _pi_child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
-#[tauri::command]
-async fn send_message(
-    state: tauri::State<'_, AppState>,
-    message: String,
-    on_event: Channel<StreamEvent>,
-) -> Result<(), String> {
-    let engine_arc = state.engine.clone();
-    let engine_guard = engine_arc.lock().await;
-    let conn = engine_guard.as_ref().ok_or("Engine not connected")?;
+// ── Pi Agent Commands ───────────────────────────────────────
 
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let msg = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "type": "tool_request",
-        "timestamp": timestamp_ms(),
-        "requestId": request_id,
-        "tool": "chat",
-        "arguments": { "message": message },
+/// Send a prompt to Pi. Response streams back as Tauri events.
+#[tauri::command]
+async fn send_prompt(
+    state: tauri::State<'_, AppState>,
+    text: String,
+) -> Result<(), String> {
+    let pi_guard = state.pi.lock().await;
+    let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
+
+    let cmd = serde_json::json!({
+        "type": "prompt",
+        "message": text,
     });
 
-    // Register for streaming messages using requestId.
-    // The read loop auto-registers streamId when stream_start arrives.
-    let mut rx = conn.register_request(&request_id).await;
-    conn.send(&msg).await.map_err(|e| e.to_string())?;
-
-    // Drop the lock so other commands can use the connection
-    drop(engine_guard);
-
-    // Read stream messages and forward to UI
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
-            Ok(Some(engine_msg)) => {
-                let msg_type = engine_msg
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-
-                stream::forward_to_channel(&engine_msg, &on_event);
-
-                if msg_type == "stream_end" {
-                    break;
-                }
-            }
-            Ok(None) => {
-                return Err("Engine connection lost".to_string());
-            }
-            Err(_) => {
-                return Err("Stream timed out".to_string());
-            }
-        }
-    }
-
-    // Cleanup
-    let engine_guard = engine_arc.lock().await;
-    if let Some(conn) = engine_guard.as_ref() {
-        conn.unregister_request(&request_id).await;
-    }
-
+    conn.send(&cmd).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
+/// Abort the current Pi agent operation.
 #[tauri::command]
-async fn get_engine_status(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let engine = state.engine.lock().await;
-    if engine.is_some() {
+async fn abort_agent(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let pi_guard = state.pi.lock().await;
+    let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
+
+    let cmd = serde_json::json!({ "type": "abort" });
+    conn.send(&cmd).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Get Pi connection status.
+#[tauri::command]
+async fn get_pi_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let pi = state.pi.lock().await;
+    if pi.is_some() {
         Ok("connected".to_string())
     } else {
         Ok("disconnected".to_string())
     }
 }
 
+/// Request Pi agent state (model, session info).
+/// The response arrives as a pi_event.
+#[tauri::command]
+async fn get_pi_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let pi_guard = state.pi.lock().await;
+    let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
+
+    let cmd = serde_json::json!({ "type": "get_state" });
+    conn.send(&cmd).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Respond to a Pi extension UI request (approval dialog, etc.).
+#[tauri::command]
+async fn respond_ui_request(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    confirmed: bool,
+) -> Result<(), String> {
+    let pi_guard = state.pi.lock().await;
+    let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
+
+    let cmd = serde_json::json!({
+        "type": "extension_ui_response",
+        "id": request_id,
+        "confirmed": confirmed,
+    });
+
+    conn.send(&cmd).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ── Native FS Commands ──────────────────────────────────────
+
 #[tauri::command]
 async fn open_workspace(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<serde_json::Value, String> {
-    // Store workspace root
     {
         let mut root = state.workspace_root.lock().await;
         *root = Some(path.clone());
     }
-
-    // Fetch initial file listing via engine
-    engine_fs_list(&state, &path).await
+    fs_list_dir(path).await
 }
 
 #[tauri::command]
-async fn fs_list(
-    state: tauri::State<'_, AppState>,
-    path: String,
-) -> Result<serde_json::Value, String> {
-    engine_fs_list(&state, &path).await
-}
+async fn fs_list_dir(path: String) -> Result<serde_json::Value, String> {
+    let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
 
-#[tauri::command]
-async fn fs_read(
-    state: tauri::State<'_, AppState>,
-    path: String,
-    start_line: Option<u32>,
-    end_line: Option<u32>,
-) -> Result<serde_json::Value, String> {
-    let engine_arc = state.engine.clone();
-    let engine_guard = engine_arc.lock().await;
-    let conn = engine_guard.as_ref().ok_or("Engine not connected")?;
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        let file_type = if metadata.is_dir() {
+            "directory"
+        } else if metadata.file_type().is_symlink() {
+            "symlink"
+        } else {
+            "file"
+        };
 
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let mut args = serde_json::json!({ "path": path });
-    if let Some(s) = start_line {
-        args["startLine"] = serde_json::json!(s);
-    }
-    if let Some(e) = end_line {
-        args["endLine"] = serde_json::json!(e);
+        result.push(serde_json::json!({
+            "name": entry.file_name().to_string_lossy(),
+            "path": entry.path().to_string_lossy(),
+            "type": file_type,
+            "size": metadata.len(),
+        }));
     }
 
-    let msg = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "type": "tool_request",
-        "timestamp": timestamp_ms(),
-        "requestId": request_id,
-        "tool": "fs_read",
-        "arguments": args,
+    // Sort: directories first, then alphabetically
+    result.sort_by(|a, b| {
+        let a_dir = a["type"] == "directory";
+        let b_dir = b["type"] == "directory";
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| {
+                let a_name = a["name"].as_str().unwrap_or("").to_lowercase();
+                let b_name = b["name"].as_str().unwrap_or("").to_lowercase();
+                a_name.cmp(&b_name)
+            })
     });
 
-    let response = conn
-        .request_response(&request_id, &msg)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Drop engine lock
-    drop(engine_guard);
-
-    // Check for error in tool_response
-    if let Some(err) = response.get("error") {
-        return Err(err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error")
-            .to_string());
-    }
-
-    Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(serde_json::Value::Array(result))
 }
 
-/// Internal helper to call fs_list on the engine.
-async fn engine_fs_list(
-    state: &AppState,
-    path: &str,
-) -> Result<serde_json::Value, String> {
-    tracing::debug!("engine_fs_list called for path: {}", path);
+#[tauri::command]
+async fn fs_read_file(path: String) -> Result<serde_json::Value, String> {
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let total_lines = content.lines().count();
+    let language = detect_language(&path);
 
-    let engine_arc = state.engine.clone();
-    let engine_guard = engine_arc.lock().await;
-    let conn = match engine_guard.as_ref() {
-        Some(c) => c,
-        None => {
-            tracing::error!("engine_fs_list: Engine not connected!");
-            return Err("Engine not connected".to_string());
+    Ok(serde_json::json!({
+        "content": content,
+        "totalLines": total_lines,
+        "language": language,
+    }))
+}
+
+fn detect_language(path: &str) -> &str {
+    match path.rsplit('.').next() {
+        Some("rs") => "rust",
+        Some("ts" | "tsx") => "typescript",
+        Some("js" | "jsx") => "javascript",
+        Some("py") => "python",
+        Some("json") => "json",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("md") => "markdown",
+        Some("css") => "css",
+        Some("html") => "html",
+        Some("sh" | "bash" | "zsh") => "shell",
+        Some("sql") => "sql",
+        Some("go") => "go",
+        Some("java") => "java",
+        Some("c" | "h") => "c",
+        Some("cpp" | "hpp" | "cc") => "cpp",
+        _ => "plaintext",
+    }
+}
+
+// ── App Setup ───────────────────────────────────────────────
+
+fn resolve_extension_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    let candidates = [
+        "pi-extensions/tide-safety.ts",
+        "pi-extensions/tide-project.ts",
+        "apps/desktop/pi-extensions/tide-safety.ts",
+        "../../apps/desktop/pi-extensions/tide-safety.ts",
+        "../../apps/desktop/pi-extensions/tide-project.ts",
+    ];
+    for candidate in &candidates {
+        let p = std::path::PathBuf::from(candidate);
+        if p.exists() {
+            if let Ok(abs) = p.canonicalize() {
+                paths.push(abs.to_string_lossy().to_string());
+            }
         }
-    };
-
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let msg = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "type": "tool_request",
-        "timestamp": timestamp_ms(),
-        "requestId": request_id,
-        "tool": "fs_list",
-        "arguments": { "path": path },
-    });
-
-    tracing::debug!("engine_fs_list: sending request {}", request_id);
-
-    let response = match conn.request_response(&request_id, &msg).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("engine_fs_list: request_response failed: {}", e);
-            return Err(e.to_string());
-        }
-    };
-
-    drop(engine_guard);
-
-    tracing::debug!("engine_fs_list: got response type={}",
-        response.get("type").and_then(|t| t.as_str()).unwrap_or("?"));
-
-    if let Some(err) = response.get("error") {
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error");
-        tracing::error!("engine_fs_list: engine error: {}", msg);
-        return Err(msg.to_string());
     }
-
-    let result = response.get("result").cloned().unwrap_or(serde_json::Value::Null);
-    tracing::debug!("engine_fs_list: returning {} entries",
-        result.as_array().map(|a| a.len()).unwrap_or(0));
-    Ok(result)
-}
-
-/// Generic helper: send a tool_request and return the result.
-async fn engine_tool_request(
-    state: &AppState,
-    tool: &str,
-    arguments: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let engine_arc = state.engine.clone();
-    let engine_guard = engine_arc.lock().await;
-    let conn = engine_guard.as_ref().ok_or("Engine not connected")?;
-
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let msg = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
-        "type": "tool_request",
-        "timestamp": timestamp_ms(),
-        "requestId": request_id,
-        "tool": tool,
-        "arguments": arguments,
-    });
-
-    let response = conn
-        .request_response(&request_id, &msg)
-        .await
-        .map_err(|e| e.to_string())?;
-    drop(engine_guard);
-
-    if let Some(err) = response.get("error") {
-        return Err(err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error")
-            .to_string());
-    }
-    Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
-}
-
-#[tauri::command]
-async fn region_tags_list(
-    state: tauri::State<'_, AppState>,
-    file_path: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let mut args = serde_json::json!({});
-    if let Some(fp) = file_path {
-        args["filePath"] = serde_json::json!(fp);
-    }
-    engine_tool_request(&state, "region_tags.list", args).await
-}
-
-#[tauri::command]
-async fn region_tags_create(
-    state: tauri::State<'_, AppState>,
-    tag: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    engine_tool_request(&state, "region_tags.create", tag).await
-}
-
-#[tauri::command]
-async fn region_tags_update(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    updates: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let mut args = updates;
-    args["id"] = serde_json::json!(id);
-    engine_tool_request(&state, "region_tags.update", args).await
-}
-
-#[tauri::command]
-async fn region_tags_delete(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<serde_json::Value, String> {
-    engine_tool_request(&state, "region_tags.delete", serde_json::json!({ "id": id })).await
-}
-
-#[tauri::command]
-async fn context_get_breakdown(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    engine_tool_request(&state, "context.get_breakdown", serde_json::json!({})).await
-}
-
-#[tauri::command]
-async fn context_get_items(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    engine_tool_request(&state, "context.get_items", serde_json::json!({})).await
-}
-
-#[tauri::command]
-async fn context_toggle_pin(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> Result<serde_json::Value, String> {
-    engine_tool_request(&state, "context.toggle_pin", serde_json::json!({ "id": id })).await
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    // Deduplicate (canonicalize may produce same absolute path)
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 pub fn run() {
@@ -330,44 +216,86 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init()) // Used by JS-side open() dialog
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            engine: Arc::new(Mutex::new(None)),
+            pi: Arc::new(Mutex::new(None)),
             workspace_root: Arc::new(Mutex::new(None)),
-            _engine_child: Arc::new(Mutex::new(None)),
+            _pi_child: Arc::new(Mutex::new(None)),
         })
         .setup(|app| {
-            let engine_state = app.state::<AppState>().inner().engine.clone();
-            let child_state = app.state::<AppState>().inner()._engine_child.clone();
+            let pi_state = app.state::<AppState>().inner().pi.clone();
+            let child_state = app.state::<AppState>().inner()._pi_child.clone();
+            let app_handle = app.handle().clone();
+
             tauri::async_runtime::spawn(async move {
-                match sidecar::start_engine().await {
+                let extensions = resolve_extension_paths();
+                tracing::info!("Pi extensions: {:?}", extensions);
+
+                // Use current directory as initial workspace (before user opens a folder)
+                let initial_cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string());
+
+                match sidecar::start_pi(&initial_cwd, &extensions).await {
                     Ok((conn, child)) => {
-                        tracing::info!("Engine sidecar started successfully");
-                        let mut engine = engine_state.lock().await;
-                        *engine = Some(conn);
+                        tracing::info!("Pi agent started successfully");
+
+                        // Background task: read Pi events, emit to React
+                        let event_rx = conn.event_rx.clone();
+                        let handle = app_handle.clone();
+                        tokio::spawn(async move {
+                            let mut rx = event_rx.lock().await;
+                            loop {
+                                match rx.recv().await {
+                                    Some(event) => {
+                                        let event_type = event
+                                            .get("type")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("unknown");
+
+                                        // Emit all Pi events as "pi_event"
+                                        if let Err(e) = handle.emit("pi_event", &event) {
+                                            tracing::error!(
+                                                "Failed to emit pi_event ({}): {}",
+                                                event_type,
+                                                e
+                                            );
+                                        }
+
+                                        // Also emit typed events for specific handlers
+                                        if event_type == "extension_ui_request" {
+                                            let _ = handle.emit("pi_ui_request", &event);
+                                        }
+                                    }
+                                    None => {
+                                        tracing::info!("Pi event channel closed");
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                        let mut pi = pi_state.lock().await;
+                        *pi = Some(conn);
                         let mut child_guard = child_state.lock().await;
                         *child_guard = Some(child);
                     }
                     Err(e) => {
-                        tracing::error!("Failed to start engine sidecar: {}", e);
+                        tracing::error!("Failed to start Pi agent: {}", e);
                     }
                 }
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            send_message,
-            get_engine_status,
+            send_prompt,
+            abort_agent,
+            get_pi_status,
+            get_pi_state,
+            respond_ui_request,
             open_workspace,
-            fs_list,
-            fs_read,
-            region_tags_list,
-            region_tags_create,
-            region_tags_update,
-            region_tags_delete,
-            context_get_breakdown,
-            context_get_items,
-            context_toggle_pin,
+            fs_list_dir,
+            fs_read_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tide");

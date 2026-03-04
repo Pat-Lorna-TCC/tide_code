@@ -2,7 +2,8 @@
   "project": "Tide IDE — Agentic Coding Environment",
   "phase": 1,
   "name": "M0: Skeleton",
-  "description": "Establish the foundational architecture: Tauri window, Node.js sidecar with UDS IPC, streaming protocol demo, and basic app shell UI.",
+  "description": "HISTORICAL — Original skeleton with Tauri window, Node.js sidecar with UDS IPC, streaming protocol demo. Engine since replaced by Pi integration in Phase 4.",
+  "archived": true,
   "created": "2026-03-03",
   "notes": [
     "Package manager: pnpm with workspaces.",

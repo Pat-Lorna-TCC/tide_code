@@ -1,12 +1,12 @@
 import { create } from "zustand";
 
-type EngineStatus = "disconnected" | "connecting" | "connected" | "error";
+type PiStatus = "disconnected" | "connecting" | "connected" | "error";
 
 interface EngineState {
-  status: EngineStatus;
+  status: PiStatus;
   errorMessage: string | null;
 
-  setStatus: (status: EngineStatus, error?: string) => void;
+  setStatus: (status: PiStatus, error?: string) => void;
 }
 
 export const useEngineStore = create<EngineState>((set) => ({

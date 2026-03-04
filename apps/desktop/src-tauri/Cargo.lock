@@ -3663,7 +3663,6 @@ dependencies = [
 name = "tide-desktop"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "serde",
  "serde_json",
  "tauri",
@@ -3671,7 +3670,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

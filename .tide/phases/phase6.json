@@ -1,169 +1,75 @@
 {
   "project": "Tide IDE — Agentic Coding Environment",
   "phase": 6,
-  "name": "M5: Providers + Router",
-  "description": "Multi-provider LLM support with adapters for OpenAI, Anthropic, GLM, Qwen, and MiniMax. Model routing per agent role, budget tracking, credential security via macOS Keychain, and router UI.",
-  "created": "2026-03-03",
+  "name": "Wire Pi Features",
+  "description": "Connect all placeholder stores and components to actual Pi data. Wire ContextDial to Pi state, LogsTab to tool execution events, region tags to Pi tide_tags tool, model switching, and diff preview to the approval flow.",
+  "created": "2026-03-04",
   "notes": [
-    "All providers normalized to Tide's internal StreamEvent format (start/delta/end).",
-    "API keys stored in macOS Keychain via Rust security-framework crate — never on disk in engine.",
-    "Budget tracking: daily and session limits enforced, stored in SQLite token_usage table.",
-    "Role-based model routing: different models for Scout/Planner/Builder/Validator.",
-    "Routing config persisted in TIDE.md.",
-    "JSON mode: enforced per-provider (native json_object where supported, system prompt enforcement otherwise)."
+    "All tasks in this phase require Pi to be available (agent login, model API).",
+    "This is the 'last mile' wiring that Phase 4 deferred.",
+    "After this phase, all UI components have real data backing them.",
+    "Phase 5 (Pi-independent polish) must be complete before starting."
   ],
 
   "tasks": [
     {
-      "id": "TIDE-065",
-      "title": "Define provider adapter interface and types",
-      "description": "Create apps/engine/src/providers/types.ts: ProviderConfig (id, displayName, apiBase, authType, models[]), ModelConfig (id, displayName, contextWindow, maxOutputTokens, inputPricePer1kTokens, outputPricePer1kTokens, supportsFunctions, supportsStreaming, supportsJsonMode), CompletionRequest (requestId, model, messages[], systemPrompt, temperature, maxTokens, jsonMode, abortSignal), TokenUsage (promptTokens, completionTokens, totalTokens, estimatedCostUsd), normalized StreamEvent types (start/delta/end). Create apps/engine/src/providers/adapter.ts: ProviderAdapter interface (initialize, healthCheck, streamCompletion returning AsyncIterable<StreamEvent>, listModels). Create apps/engine/src/providers/base-adapter.ts: abstract BaseProviderAdapter with shared SSE parsing, error handling, retry, abort signal wiring. Abstract methods: transformChunk, buildRequest.",
+      "id": "TIDE-060",
+      "title": "Wire ContextDial to Pi get_state",
+      "description": "Parse Pi's state response for session stats (token count, context window size, model info). Map to BudgetBreakdown format. Update contextStore.refreshBreakdown to call getPiState() and handle the state_update event in stream.ts. ContextDial renders real usage percentage.",
       "files": [
-        "apps/engine/src/providers/types.ts",
-        "apps/engine/src/providers/adapter.ts",
-        "apps/engine/src/providers/base-adapter.ts"
+        "src/stores/contextStore.ts",
+        "src/stores/stream.ts",
+        "src/components/StatusBar/ContextDial.tsx"
       ],
       "status": "pending",
       "priority": "high"
     },
     {
-      "id": "TIDE-066",
-      "title": "Implement OpenAI provider adapter",
-      "description": "Create apps/engine/src/providers/adapters/openai.ts: extends BaseProviderAdapter. API: POST https://api.openai.com/v1/chat/completions with stream:true. Auth: Authorization: Bearer <key>. JSON mode: response_format: { type: 'json_object' }. SSE parsing: data: {choices:[{delta:{content:'...'}}]}. Usage from final chunk. Models: gpt-4o, gpt-4o-mini, o3, etc. with context windows and pricing.",
+      "id": "TIDE-061",
+      "title": "Wire LogsTab to Pi tool execution events",
+      "description": "In stream.ts, when handling tool_execution_start and tool_execution_end events, call logStore.addToolStart and logStore.completeToolLog. Enrich log entries with tool arguments and results from the event payload. LogsTab displays live tool execution history.",
       "files": [
-        "apps/engine/src/providers/adapters/openai.ts"
+        "src/stores/stream.ts",
+        "src/stores/logStore.ts",
+        "src/components/AgentPanel/LogsTab.tsx"
       ],
       "status": "pending",
       "priority": "high"
     },
     {
-      "id": "TIDE-067",
-      "title": "Implement Anthropic provider adapter",
-      "description": "Create apps/engine/src/providers/adapters/anthropic.ts: extends BaseProviderAdapter. API: POST https://api.anthropic.com/v1/messages with stream:true. Auth: x-api-key header + anthropic-version. System prompt as separate 'system' field. SSE events: message_start, content_block_start, content_block_delta, message_delta, message_stop. Usage from message_start and message_delta events. JSON mode: via system prompt instruction. Models: claude-sonnet-4-20250514, claude-opus-4-20250514, claude-haiku-4-5-20251001, etc.",
+      "id": "TIDE-062",
+      "title": "Wire Region Tags to Pi tide_tags tool",
+      "description": "Update regionTagStore to persist tags by sending prompts to Pi that invoke the tide_tags tool. Extend tide-project.ts to support create/update/delete operations on tags.json (currently read-only). Tags persist across sessions via .tide/tags/tags.json.",
       "files": [
-        "apps/engine/src/providers/adapters/anthropic.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-068",
-      "title": "Implement GLM (Zhipu) provider adapter",
-      "description": "Create apps/engine/src/providers/adapters/glm.ts: extends BaseProviderAdapter. API: POST https://open.bigmodel.cn/api/paas/v4/chat/completions. Auth: JWT token generated from API key (key format: {id}.{secret}, must sign JWT with HS256). OpenAI-compatible SSE format. JSON mode: response_format: { type: 'json_object' }. Models: glm-4, glm-4-flash, glm-4-long.",
-      "files": [
-        "apps/engine/src/providers/adapters/glm.ts"
+        "src/stores/regionTagStore.ts",
+        "apps/desktop/pi-extensions/tide-project.ts"
       ],
       "status": "pending",
       "priority": "medium"
     },
     {
-      "id": "TIDE-069",
-      "title": "Implement Qwen (DashScope) provider adapter",
-      "description": "Create apps/engine/src/providers/adapters/qwen.ts: extends BaseProviderAdapter. API: POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions (OpenAI-compatible mode). Auth: Authorization: Bearer <key>. OpenAI-compatible SSE format. JSON mode: supported via response_format. Models: qwen-max, qwen-plus, qwen-turbo, qwen-long.",
+      "id": "TIDE-063",
+      "title": "Build Model Picker in Status Bar",
+      "description": "ModelPicker.tsx component showing current model name in status bar with dropdown to switch. New Tauri command set_pi_model that sends set_model to Pi stdin. Pi's get_state response provides model info. Manual override persists for the session.",
       "files": [
-        "apps/engine/src/providers/adapters/qwen.ts"
+        "src/components/StatusBar/ModelPicker.tsx",
+        "src-tauri/src/lib.rs",
+        "src/lib/ipc.ts",
+        "src/App.tsx"
       ],
       "status": "pending",
       "priority": "medium"
     },
     {
-      "id": "TIDE-070",
-      "title": "Implement MiniMax provider adapter",
-      "description": "Create apps/engine/src/providers/adapters/minimax.ts: extends BaseProviderAdapter. API: POST https://api.minimax.chat/v1/text/chatcompletion_v2. Auth: Authorization: Bearer <key> + X-MiniMax-Group-Id header. Custom SSE format with MiniMax-specific fields. JSON mode: via reply_constraints + system prompt. Models: abab6.5-chat, abab5.5-chat. Token usage from response usage object.",
+      "id": "TIDE-064",
+      "title": "Wire Diff Preview to Approval Flow",
+      "description": "Extend tide-safety.ts to read file content before a write/edit tool call and include it as originalContent in the ctx.ui.confirm() payload. The approval event carries both original and new content. ApprovalDialog (enhanced in TIDE-057) renders the real diff.",
       "files": [
-        "apps/engine/src/providers/adapters/minimax.ts"
+        "apps/desktop/pi-extensions/tide-safety.ts",
+        "src/stores/approvalStore.ts"
       ],
       "status": "pending",
       "priority": "medium"
-    },
-    {
-      "id": "TIDE-071",
-      "title": "Create provider registry and factory",
-      "description": "Create apps/engine/src/providers/index.ts: PROVIDER_REGISTRY mapping provider ID to factory function. createAdapter(providerId) returns new adapter instance. Export all provider configs with default model listings. Used by ModelRouter to instantiate adapters on demand.",
-      "files": [
-        "apps/engine/src/providers/index.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-072",
-      "title": "Build ModelRouter",
-      "description": "Create apps/engine/src/router/router.ts: ModelRouter class. route(request, role) method: 1) resolve model from role-based defaults in RoutingConfig, 2) check budget via BudgetTracker, 3) get/create adapter, 4) forward request yielding StreamEvents, 5) on StreamEnd record usage. Supports fallback chain if primary provider fails. Create apps/engine/src/router/config.ts: RoutingConfig (roleDefaults mapping role to ModelSelection, BudgetConfig with dailyLimitUsd, sessionLimitUsd, warningThresholdPercent). Persisted in TIDE.md.",
-      "files": [
-        "apps/engine/src/router/router.ts",
-        "apps/engine/src/router/config.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-073",
-      "title": "Implement budget tracking",
-      "description": "Create apps/engine/src/router/budget.ts: BudgetTracker class. Records token usage to SQLite token_usage table (id, session_id, provider, model, prompt_tokens, completion_tokens, estimated_cost_usd, created_at). Methods: record(usage), getDailySpend(), getSessionSpend(), assertWithinBudget(estimatedCost) throws BudgetExceededError, getSummary() returns BudgetSummary. Create apps/engine/src/router/cost-estimator.ts: CostEstimator for pre-request cost estimation based on message token count + model pricing.",
-      "files": [
-        "apps/engine/src/router/budget.ts",
-        "apps/engine/src/router/cost-estimator.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-074",
-      "title": "Implement macOS Keychain credential storage",
-      "description": "Create apps/desktop/src-tauri/src/keychain.rs: functions to store, retrieve, and delete credentials using the security-framework crate (macOS Keychain). Service name: 'dev.tide.ide'. Account format: 'provider.<providerId>.apiKey'. Add IPC message types: secure_store, secure_retrieve, secure_delete. Wire into Rust IPC handler. Engine requests credentials from Rust on startup and when provider is configured.",
-      "files": [
-        "apps/desktop/src-tauri/src/keychain.rs",
-        "apps/desktop/src-tauri/src/ipc.rs",
-        "apps/desktop/src-tauri/Cargo.toml"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-075",
-      "title": "Build ProviderSettings UI",
-      "description": "Create apps/desktop/src/components/Settings/ProviderSettings.tsx: settings panel listing all supported providers with status indicators (configured/not configured/error). For each provider: API key input (masked), optional org ID, 'Test Connection' button that calls healthCheck. On success: shows latency and available model list. On save: sends credential to engine -> Rust Keychain. Create apps/desktop/src/stores/routerStore.ts: Zustand store with providers, routing config, budget summary.",
-      "files": [
-        "apps/desktop/src/components/Settings/ProviderSettings.tsx",
-        "apps/desktop/src/components/Settings/ProviderSettings.module.css",
-        "apps/desktop/src/stores/routerStore.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
-    },
-    {
-      "id": "TIDE-076",
-      "title": "Build ModelPicker UI",
-      "description": "Create apps/desktop/src/components/Settings/ModelPicker.tsx: table with rows for each role (Scout, Planner, Builder, Validator). Each row: dropdown showing available models grouped by provider (only configured providers). Shows context window and price per 1K tokens. 'Apply' button saves to RoutingConfig. Persists to TIDE.md via engine IPC.",
-      "files": [
-        "apps/desktop/src/components/Settings/ModelPicker.tsx",
-        "apps/desktop/src/components/Settings/ModelPicker.module.css"
-      ],
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "TIDE-077",
-      "title": "Build status bar indicators (budget + active model)",
-      "description": "Create apps/desktop/src/components/StatusBar/BudgetIndicator.tsx: shows '$X.XX / $Y.YY daily' with color coding matching context dial thresholds. Hover tooltip: breakdown by provider, by role, session vs daily. Create apps/desktop/src/components/StatusBar/ActiveModelIndicator.tsx: shows current active model/provider. Click opens quick-switch popover for changing builder model on the fly. Both integrated into the bottom status bar.",
-      "files": [
-        "apps/desktop/src/components/StatusBar/BudgetIndicator.tsx",
-        "apps/desktop/src/components/StatusBar/ActiveModelIndicator.tsx"
-      ],
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "TIDE-078",
-      "title": "Replace hardcoded LLM client with ModelRouter",
-      "description": "Update apps/engine/src/orchestration/orchestrator.ts to use ModelRouter instead of the hardcoded LLMClient from Phase 5. Each agent role (scout, planner, builder, validator) now routes through the ModelRouter which selects the appropriate provider+model. Update llm-client.ts to become a thin wrapper that delegates to ModelRouter. Verify the full agentic workflow still works with the new routing.",
-      "files": [
-        "apps/engine/src/orchestration/orchestrator.ts",
-        "apps/engine/src/orchestration/llm-client.ts"
-      ],
-      "status": "pending",
-      "priority": "high"
     }
   ]
 }

@@ -1,8 +1,9 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import { Transport } from "./ipc/transport.js";
-import { handleMessage } from "./ipc/handler.js";
+import { handleMessage, setSafetyConfig } from "./ipc/handler.js";
 import { closeDb } from "./persistence/sqlite.js";
+import { loadTideMd } from "./safety/tide-md-loader.js";
 
 function parseArgs(): { socket: string } {
   const args = process.argv.slice(2);
@@ -27,6 +28,11 @@ function cleanupSocket(socketPath: string): void {
 const { socket: socketPath } = parseArgs();
 
 cleanupSocket(socketPath);
+
+// Load safety config from TIDE.md
+const safetyConfig = loadTideMd(process.cwd());
+setSafetyConfig(safetyConfig);
+console.log("[engine] Safety config loaded:", JSON.stringify(safetyConfig.approvalPolicy));
 
 const server = net.createServer((connection) => {
   console.log("[engine] Client connected");

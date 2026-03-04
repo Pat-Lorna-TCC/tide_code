@@ -1,9 +1,11 @@
 import { useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEngineStore } from "./stores/engine";
 import { useWorkspaceStore, type FsEntry } from "./stores/workspace";
 import { useUiStore } from "./stores/ui";
+import { useStreamStore } from "./stores/stream";
+import { getPiStatus, openWorkspace } from "./lib/ipc";
+import { onPiEvent } from "./lib/pi-events";
 import { SplitPane } from "./components/Layout/SplitPane";
 import { GlobalLoader } from "./components/GlobalLoader";
 import { FileTree } from "./components/FileTree/FileTree";
@@ -12,6 +14,8 @@ import { MonacoEditor } from "./components/Editor/MonacoEditor";
 import { AgentPanel } from "./components/AgentPanel/AgentPanel";
 import { ContextDial } from "./components/StatusBar/ContextDial";
 import { ContextInspector } from "./components/ContextInspector/ContextInspector";
+import { ApprovalDialog } from "./components/Approval/ApprovalDialog";
+import { initApprovalListener } from "./stores/approvalStore";
 import "./styles/global.css";
 
 interface RawFsEntry {
@@ -36,18 +40,34 @@ export function App() {
     useWorkspaceStore();
   const { startLoading, stopLoading } = useUiStore();
 
-  // Poll engine status
+  const { handlePiEvent } = useStreamStore();
+
+  // Initialize listeners on mount
+  useEffect(() => {
+    initApprovalListener();
+
+    // Subscribe to all Pi events and forward to stream store
+    const cleanup = onPiEvent((event) => {
+      handlePiEvent(event);
+    });
+
+    return () => {
+      cleanup.then((unlisten) => unlisten());
+    };
+  }, [handlePiEvent]);
+
+  // Poll Pi status
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
       try {
-        const result = await invoke<string>("get_engine_status");
+        const result = await getPiStatus();
         if (!cancelled) setStatus(result === "connected" ? "connected" : "disconnected");
       } catch {
         if (!cancelled) setStatus("disconnected");
       }
     };
-    const interval = setInterval(check, 1000);
+    const interval = setInterval(check, 2000);
     check();
     return () => {
       cancelled = true;
@@ -57,18 +77,15 @@ export function App() {
 
   const handleOpenFolder = useCallback(async () => {
     try {
-      console.log("[Tide] Opening folder dialog...");
       const selected = await open({ directory: true, title: "Open Folder" });
-      console.log("[Tide] Dialog result:", selected);
-      if (!selected) return; // User cancelled
+      if (!selected) return;
 
       const folderPath = typeof selected === "string" ? selected : selected[0];
       if (!folderPath) return;
 
       startLoading("Opening workspace...");
       try {
-        const entries = await invoke<RawFsEntry[]>("open_workspace", { path: folderPath });
-        console.log("[Tide] Workspace opened, entries:", entries?.length);
+        const entries = await openWorkspace(folderPath);
         setRootPath(folderPath);
         setFileTree(toFsEntries(entries));
       } finally {
@@ -96,7 +113,7 @@ export function App() {
       <div style={s.topBar}>
         <span style={s.title}>Tide</span>
         <span style={{ ...s.statusDot, background: statusColor }} />
-        <span style={s.statusText}>Engine: {status}</span>
+        <span style={s.statusText}>Pi: {status}</span>
         <div style={{ flex: 1 }} />
         {!rootPath && (
           <button style={s.openBtn} onClick={handleOpenFolder}>
@@ -170,6 +187,9 @@ export function App() {
 
       {/* Context Inspector overlay */}
       <ContextInspector />
+
+      {/* Approval dialog overlay */}
+      <ApprovalDialog />
     </div>
   );
 }

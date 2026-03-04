@@ -45,6 +45,28 @@ function initTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_region_tags_file_path
       ON region_tags(file_path);
+
+    CREATE TABLE IF NOT EXISTS tool_logs (
+      id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL,
+      session_id TEXT,
+      tool_name TEXT NOT NULL,
+      args_json TEXT NOT NULL,
+      safety_level TEXT NOT NULL,
+      approval_required INTEGER NOT NULL DEFAULT 0,
+      approval_result TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      duration_ms INTEGER,
+      status TEXT NOT NULL DEFAULT 'running',
+      result_json TEXT,
+      error TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_logs_request
+      ON tool_logs(request_id);
+    CREATE INDEX IF NOT EXISTS idx_tool_logs_session
+      ON tool_logs(session_id);
   `);
 }
 

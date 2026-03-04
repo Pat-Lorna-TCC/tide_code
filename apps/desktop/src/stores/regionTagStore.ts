@@ -1,13 +1,12 @@
 import { create } from "zustand";
-import { invoke } from "@tauri-apps/api/core";
 import type { RegionTag, CreateRegionTag } from "@tide/shared";
 
+// TODO: Rewire to Pi's tide_tags tool in Phase 5.
+// Region tags will be stored as JSON in .tide/tags/ and managed by the tide-project.ts extension.
+
 interface RegionTagState {
-  /** All tags indexed by id. */
   tags: Map<string, RegionTag>;
-  /** Tag ids grouped by file path. */
   tagsByFile: Map<string, Set<string>>;
-  /** Tag ids that have stale content (hash mismatch). */
   staleTags: Set<string>;
 
   loadTagsForFile: (filePath: string) => Promise<void>;
@@ -25,38 +24,24 @@ export const useRegionTagStore = create<RegionTagState>((set, get) => ({
   tagsByFile: new Map(),
   staleTags: new Set(),
 
-  loadTagsForFile: async (filePath: string) => {
-    const result = await invoke<RegionTag[]>("region_tags_list", { filePath });
-    set((state) => {
-      const tags = new Map(state.tags);
-      const tagsByFile = new Map(state.tagsByFile);
-      const fileSet = new Set<string>();
-      for (const tag of result) {
-        tags.set(tag.id, tag);
-        fileSet.add(tag.id);
-      }
-      tagsByFile.set(filePath, fileSet);
-      return { tags, tagsByFile };
-    });
+  loadTagsForFile: async (_filePath: string) => {
+    // No-op: Region tags backend not yet connected to Pi. See Phase 5.
   },
 
   loadAllTags: async () => {
-    const result = await invoke<RegionTag[]>("region_tags_list", {});
-    set(() => {
-      const tags = new Map<string, RegionTag>();
-      const tagsByFile = new Map<string, Set<string>>();
-      for (const tag of result) {
-        tags.set(tag.id, tag);
-        const fileSet = tagsByFile.get(tag.filePath) ?? new Set();
-        fileSet.add(tag.id);
-        tagsByFile.set(tag.filePath, fileSet);
-      }
-      return { tags, tagsByFile, staleTags: new Set() };
-    });
+    // No-op: Region tags backend not yet connected to Pi. See Phase 5.
   },
 
   createTag: async (input: CreateRegionTag) => {
-    const tag = await invoke<RegionTag>("region_tags_create", { tag: input });
+    console.warn("[regionTagStore] createTag not yet connected to Pi backend");
+    // Return a stub tag so callers don't crash
+    const tag: RegionTag = {
+      ...input,
+      id: crypto.randomUUID(),
+      pinned: input.pinned ?? false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
     set((state) => {
       const tags = new Map(state.tags);
       tags.set(tag.id, tag);
@@ -71,7 +56,6 @@ export const useRegionTagStore = create<RegionTagState>((set, get) => ({
 
   deleteTag: async (id: string) => {
     const tag = get().tags.get(id);
-    await invoke("region_tags_delete", { id });
     set((state) => {
       const tags = new Map(state.tags);
       tags.delete(id);
@@ -90,14 +74,9 @@ export const useRegionTagStore = create<RegionTagState>((set, get) => ({
   togglePin: async (id: string) => {
     const tag = get().tags.get(id);
     if (!tag) return;
-    const newPinned = !tag.pinned;
-    const updated = await invoke<RegionTag>("region_tags_update", {
-      id,
-      updates: { pinned: newPinned },
-    });
     set((state) => {
       const tags = new Map(state.tags);
-      tags.set(id, updated);
+      tags.set(id, { ...tag, pinned: !tag.pinned, updatedAt: new Date().toISOString() });
       return { tags };
     });
   },

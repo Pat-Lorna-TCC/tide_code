@@ -1,18 +1,53 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
-import type { StreamEvent } from "@tide/shared/stream";
+import { invoke } from "@tauri-apps/api/core";
 
-/**
- * Send a message to the engine via Tauri invoke, receiving streaming responses.
- */
-export async function sendMessage(
-  message: string,
-  onEvent: (event: StreamEvent) => void
+export interface FsEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory" | "symlink";
+  size?: number;
+}
+
+/** Send a prompt to the Pi agent. Events stream back via Tauri events. */
+export async function sendPrompt(text: string): Promise<void> {
+  await invoke("send_prompt", { text });
+}
+
+/** Abort the current Pi agent operation. */
+export async function abortAgent(): Promise<void> {
+  await invoke("abort_agent");
+}
+
+/** Get Pi connection status. */
+export async function getPiStatus(): Promise<string> {
+  return invoke<string>("get_pi_status");
+}
+
+/** Request Pi agent state (model, session info). Response arrives as pi_event. */
+export async function getPiState(): Promise<void> {
+  await invoke("get_pi_state");
+}
+
+/** Respond to a Pi extension UI request (approval dialog). */
+export async function respondUiRequest(
+  requestId: string,
+  confirmed: boolean,
 ): Promise<void> {
-  const channel = new Channel<StreamEvent>();
-  channel.onmessage = onEvent;
+  await invoke("respond_ui_request", { requestId, confirmed });
+}
 
-  await invoke("send_message", {
-    message,
-    onEvent: channel,
-  });
+/** Open a workspace directory. Returns file listing. */
+export async function openWorkspace(path: string): Promise<FsEntry[]> {
+  return invoke<FsEntry[]>("open_workspace", { path });
+}
+
+/** List directory contents (native Rust). */
+export async function fsListDir(path: string): Promise<FsEntry[]> {
+  return invoke<FsEntry[]>("fs_list_dir", { path });
+}
+
+/** Read a file (native Rust). */
+export async function fsReadFile(
+  path: string,
+): Promise<{ content: string; totalLines: number; language: string }> {
+  return invoke("fs_read_file", { path });
 }

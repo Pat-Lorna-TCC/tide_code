@@ -2,7 +2,8 @@
   "project": "Tide IDE — Agentic Coding Environment",
   "phase": 3,
   "name": "M2: Region Tagging + Context Dial",
-  "description": "Tag code ranges in the editor, attach them to agent context, persist tags in SQLite. Build the context management engine with budget tracking and the Context Status Dial + Context Inspector UI.",
+  "description": "HISTORICAL — Region tagging, context dial, context inspector UI. UI components still in use; backend persistence since replaced by Pi integration (tags moving to JSON in .tide/tags/).",
+  "archived": true,
   "created": "2026-03-03",
   "notes": [
     "Region tags use line/column ranges (survive minor edits better than character offsets).",

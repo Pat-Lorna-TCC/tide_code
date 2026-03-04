@@ -1,0 +1,76 @@
+{
+  "project": "Tide IDE — Agentic Coding Environment",
+  "phase": 9,
+  "name": "Skills + Extensibility",
+  "description": "Build the skills system — focused, composable actions invokable from the Command Palette. Pi extension-based skills for test discovery, code explanation, refactoring, and repo map generation. Skill management UI for viewing, enabling, and trusting skills.",
+  "created": "2026-03-04",
+  "notes": [
+    "Skills are Pi extensions in .tide/skills/ (workspace-local) or pi-extensions/skills/ (built-in).",
+    "Each skill registers as a command in the Command Palette.",
+    "Skills can parallel with Phase 7/8 development.",
+    "Workspace-local skills require explicit trust before activation.",
+    "Repo map generator is critical for smart context injection in Phase 10."
+  ],
+
+  "tasks": [
+    {
+      "id": "TIDE-075",
+      "title": "Build Skill Registration Framework",
+      "description": "Define Skill interface: { id, name, description, category, permissions, execute }. Skills register into the command store and are available from Command Palette. Rust skills.rs module scans .tide/skills/ and pi-extensions/skills/ directories. Skills loaded as Pi extensions. New Tauri command: list_skills.",
+      "files": [
+        "src/lib/skills.ts",
+        "src-tauri/src/skills.rs",
+        "src-tauri/src/lib.rs",
+        "apps/desktop/pi-extensions/skills/"
+      ],
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "TIDE-076",
+      "title": "Create Test Discovery Skill",
+      "description": "Pi extension skill that scans the workspace for test frameworks (jest, vitest, pytest, cargo test, go test, etc.) by looking at package.json, Cargo.toml, pyproject.toml, go.mod. Presents findings via Pi response. Confirmed test commands written to TIDE.md test_commands section. Available as 'Tide: Discover Tests' in Command Palette.",
+      "files": ["apps/desktop/pi-extensions/skills/test-discovery.ts"],
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "TIDE-077",
+      "title": "Create Explain Code Skill",
+      "description": "Select code in Monaco editor, invoke from Command Palette ('Tide: Explain Selection') or editor context menu. Sends selected region (file path + line range + content) to Pi with an explanation system prompt. Streams response in the AgentPanel. Optionally saves explanation as a region tag note.",
+      "files": [
+        "apps/desktop/pi-extensions/skills/explain-code.ts",
+        "src/components/Editor/MonacoEditor.tsx"
+      ],
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "TIDE-078",
+      "title": "Create Refactor Skill",
+      "description": "Select code, invoke refactoring operations from Command Palette: Extract Function, Rename Symbol, Inline Variable, Convert to Interface. Each operation sends a focused prompt to Pi with the selected code, surrounding file context, and specific refactoring instructions. Uses Pi's edit tool for modifications.",
+      "files": ["apps/desktop/pi-extensions/skills/refactor.ts"],
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "TIDE-079",
+      "title": "Build Repo Map Generator",
+      "description": "Skill that generates a project structure summary: file tree + key exports/classes/functions per file. Stores result in .tide/repo-map.md. Injected into agent context by tide-project.ts. Regenerated on workspace open or via Command Palette ('Tide: Regenerate Repo Map'). Uses a fast model for analysis to minimize cost.",
+      "files": [
+        "apps/desktop/pi-extensions/skills/repo-map.ts",
+        "apps/desktop/pi-extensions/tide-project.ts"
+      ],
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "TIDE-080",
+      "title": "Build Skill Management UI",
+      "description": "Settings panel tab showing installed skills: name, description, source (built-in vs workspace-local), enabled/disabled toggle. Workspace-local skills (.tide/skills/) show a 'Trust' prompt before activation. Permissions listed per skill.",
+      "files": ["src/components/Settings/SkillSettings.tsx"],
+      "status": "pending",
+      "priority": "low"
+    }
+  ]
+}

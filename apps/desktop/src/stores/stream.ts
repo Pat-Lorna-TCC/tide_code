@@ -1,54 +1,87 @@
 import { create } from "zustand";
-import type { StreamEvent } from "@tide/shared/stream";
+import type { PiEvent } from "../lib/pi-events";
+
+interface ToolCallState {
+  id: string;
+  toolName: string;
+  status: "running" | "completed" | "error";
+}
 
 interface StreamState {
-  streamId: string | null;
   content: string;
   isStreaming: boolean;
-  seq: number;
+  agentActive: boolean;
+  activeToolCalls: ToolCallState[];
 
-  startStream: (streamId: string) => void;
-  appendDelta: (content: string, seq: number) => void;
-  endStream: () => void;
+  handlePiEvent: (event: PiEvent) => void;
   reset: () => void;
-  handleEvent: (event: StreamEvent) => void;
 }
 
 export const useStreamStore = create<StreamState>((set) => ({
-  streamId: null,
   content: "",
   isStreaming: false,
-  seq: 0,
+  agentActive: false,
+  activeToolCalls: [],
 
-  startStream: (streamId) =>
-    set({ streamId, content: "", isStreaming: true, seq: 0 }),
-
-  appendDelta: (content, seq) =>
-    set((state) => ({
-      content: state.content + content,
-      seq,
-    })),
-
-  endStream: () =>
-    set({ isStreaming: false }),
-
-  reset: () =>
-    set({ streamId: null, content: "", isStreaming: false, seq: 0 }),
-
-  handleEvent: (event) => {
+  handlePiEvent: (event: PiEvent) => {
     switch (event.type) {
-      case "start":
-        set({ streamId: event.streamId, content: "", isStreaming: true, seq: 0 });
+      case "agent_start":
+        set({
+          agentActive: true,
+          isStreaming: true,
+          content: "",
+          activeToolCalls: [],
+        });
         break;
-      case "delta":
+
+      case "agent_end":
+        set({ agentActive: false, isStreaming: false });
+        break;
+
+      case "message_update": {
+        // Handle text deltas from Pi's streaming
+        const ame = (event as any).assistantMessageEvent;
+        if (ame?.type === "text_delta" && typeof ame.delta === "string") {
+          set((state) => ({ content: state.content + ame.delta }));
+        }
+        break;
+      }
+
+      case "tool_execution_start": {
+        const e = event as any;
         set((state) => ({
-          content: state.content + event.content,
-          seq: event.seq,
+          activeToolCalls: [
+            ...state.activeToolCalls,
+            {
+              id: e.toolCallId || e.tool_call_id || "",
+              toolName: e.toolName || e.tool_name || "unknown",
+              status: "running" as const,
+            },
+          ],
         }));
         break;
-      case "end":
-        set({ isStreaming: false });
+      }
+
+      case "tool_execution_end": {
+        const e = event as any;
+        const callId = e.toolCallId || e.tool_call_id || "";
+        set((state) => ({
+          activeToolCalls: state.activeToolCalls.map((tc) =>
+            tc.id === callId
+              ? { ...tc, status: "completed" as const }
+              : tc,
+          ),
+        }));
         break;
+      }
     }
   },
+
+  reset: () =>
+    set({
+      content: "",
+      isStreaming: false,
+      agentActive: false,
+      activeToolCalls: [],
+    }),
 }));

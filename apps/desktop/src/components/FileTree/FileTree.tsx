@@ -32,7 +32,7 @@ function TreeItem({ entry, depth }: { entry: FsEntry; depth: number }) {
       // Lazy load children if not loaded yet
       if (!isOpen && !entry.children) {
         try {
-          const result = await invoke<RawFsEntry[]>("fs_list", {
+          const result = await invoke<RawFsEntry[]>("fs_list_dir", {
             path: entry.path,
           });
           setDirChildren(entry.path, toFsEntries(result));
@@ -47,7 +47,7 @@ function TreeItem({ entry, depth }: { entry: FsEntry; depth: number }) {
           content: string;
           totalLines: number;
           language: string;
-        }>("fs_read", { path: entry.path });
+        }>("fs_read_file", { path: entry.path });
         openFile({
           path: entry.path,
           name: entry.name,

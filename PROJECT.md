@@ -1,325 +1,237 @@
-# .tide/PROJECT.md
-Tide IDE — Agentic Coding Environment (macOS-first)
-Spec v0.6 (updated decisions) | 2026-03-03
-1) Product Summary
-Tide is a desktop IDE built with Tauri (Rust shell) + React (UI) + a Node.js/TypeScript sidecar (“Tide Engine”). It combines a VS Code-like repo browsing/editing experience with a deterministic agent workflow (Scout → Planner → Builder → Validator), plan-first execution, strict JSON tool calling, and durable project memory via a repo-local .tide/ folder.
+# Tide IDE — Agentic Coding Environment
+Spec v2.0 | 2026-03-04
 
-2) Non-Negotiables (Hard Rules)
-Strict JSON tool calling only: every model output is exactly one JSON envelope: tool_call / question / final.
-Plan-before-build: Builder does not modify code unless a feature plan exists (unless user explicitly overrides).
-Durable context lives in .tide/: chat history is not canonical memory.
-Tunable safety: write/command/git-write operations require explicit approval unless enabled.
-No Python required: orchestration, tools, routing, skills/extensions in Node/TS (+ Rust shell).
-< 1000 LOC per file: CI hard-fails at 1000, warns at 800.
-Artifacts over narration: truth = patches, diffs, tool logs, test results, plan versions.
-No RAG for project direction / task storage: direction and tasks live in explicit .tide/ files + SQLite (see §8 and §18).
-3) Primary UX (v0.1)
-3.1 IDE layout
-Left: file tree, quick search, .tide shortcuts (open TIDE.md, open active feature plan).
-Center: Monaco editor tabs + optional diff view.
-Right: Agent panel tabs: Chat, Plan, Execute, Validate, Logs.
-Bottom status bar: engine connected, active model/provider, git status, tests status, safety mode, Context Status Dial (see §12).
-3.2 Core flows
-Open workspace → browse tree → open files in Monaco.
-Select lines → Tag Region → attach to agent input.
-Plan → generate/update .tide/features/<feature>.json.
-Execute → run tasks step-by-step with approvals.
-Validate → run validator checks + tests; “Done” requires acceptance criteria pass.
-4) Architecture Overview
-4.1 Processes
-Tauri/Rust (desktop shell): sidecar lifecycle, secure OS boundary, event emission to WebView.
-React/WebView (UI): IDE rendering, attachments, approvals, settings, streaming display.
-Node/TypeScript sidecar (Tide Engine): orchestration, context packing, strict parsing, routing, tools execution, persistence.
-4.2 Authority model (important)
-Tide Engine is the authority for: tool schemas, safety enforcement, orchestration, logging, persistence.
-UI is the authority for: user intent, approvals/denials, what is attached/pinned as context.
-5) Pi Parity Requirement (Skills, Extensions, Context Management)
-Tide must support everything Pi can do in principle regarding:
+## 1) Vision
 
-skills (capabilities beyond raw tools)
-extensions (packaged skill bundles)
-context management (long tasks, context passing, budgeting)
-Tide may delegate coding reasoning to Pi-style components, but Tide remains the deterministic harness (strict envelopes + safety + logs).
+Tide is a desktop IDE that makes AI coding agents **transparent, controllable, and orchestrated**. Built with Tauri (Rust) + React, it wraps the Pi coding agent as its core engine — then adds an orchestration layer on top: multi-step task planning, cost-aware model routing, persistent project memory, and safety-gated tool execution.
 
-6) Pi Integration Boundary (Safe Delegation)
-6.1 What can be delegated to Pi
-The Builder brain (coding reasoning / patch proposal generation)
-Optional: specialized skills implemented by Pi modules (refactor/test helpers), if they respect Tide’s tool/safety boundary
-6.2 What is never delegated
-Safety policy & approvals
-Tool registry schema enforcement
-Persistent .tide context as source of truth
-Logging and audit trail
-Orchestration state machine (Scout/Planner/Validator handoffs)
-6.3 Compatibility approach
-Tide Engine provides a CodingBackend interface for Builder:
+**Mission**: Create the best tool for agentic coding — where developers see exactly what the agent knows, control what it does, and benefit from intelligent multi-agent workflows that handle complex tasks end-to-end.
 
-native_builder (Tide prompts)
-pi_builder (Pi adapter)
-Regardless of backend, outputs must be Tide’s strict envelopes. Non-compliant outputs are rejected and retried with explicit validation errors.
+**Target user**: Professional developers who use AI coding agents daily and want more control, visibility, and intelligence than a CLI or editor plugin provides.
 
-7) Tech Stack (No MUI)
-7.1 Desktop/UI
+## 2) Why Tide
+
+| Dimension | Claude Code CLI | Cursor | Copilot | **Tide** |
+|-----------|----------------|--------|---------|----------|
+| Context visibility | None (terminal) | Minimal | None | **Glass-box**: Context Dial, Inspector, budget breakdown |
+| Multi-step orchestration | None | None | None | **Route → Plan → Build → Review** pipeline |
+| Safety controls | y/n in terminal | Implicit | None | **Configurable policies**, diff preview, audit logs |
+| Project memory | CLAUDE.md only | None | None | **Persistent .tide/**:  tags, plans, memory, sessions |
+| Cost management | None | Hidden | Hidden | **Cost tracker**, model routing by task complexity |
+| Extensibility | MCP servers | Extensions | Plugins | **Skills** (Pi extensions) + Command Palette |
+
+**Tide's differentiators:**
+- **Glass-box context**: See exactly what the agent sees — token budget, pinned regions, injected context
+- **Orchestrated workflows**: Complex tasks get routed through Planner → Builder → Reviewer automatically
+- **Persistent project memory**: .tide/ folder survives sessions — the agent learns your project over time
+- **Cost-aware routing**: Simple edits use fast/cheap models; complex architecture uses powerful ones
+- **Safety-first**: Approval dialogs with diff previews, configurable policies, command allowlists
+
+## 3) Architecture
+
+### 3.1 System Layers
+
+```
 Tauri (Rust)
-React + Vite
-Monaco Editor
-UI components strategy:
-accessible primitives (menus, dialogs, popovers)
-“copy-in” component approach (shadcn-style) where useful
-Tide-specific IDE chrome components (SplitPane, FileTree, ToolCallViewer, ContextInspector)
-State: Zustand
-Runtime validation: Zod
-7.2 Engine
-Node.js + TypeScript
-SQLite (local persistence)
-Git integration (read by default; write optional)
-Structured JSON logs + DB records
-8) .tide/ Durable Context System (Canonical Memory)
-8.1 Files
-TIDE.md (repo root): operational rules, safety profile, allowlists, router defaults, test commands (source of truth).
-.tide/PROJECT.md: this spec.
-.tide/features/*.json: plans (execution contracts).
-8.2 Context precedence (highest → lowest)
-User attachments (regions, files, diffs)
-Active feature plan
-.tide/PROJECT.md
-TIDE.md
-Repo map summary (Scout output)
-Session history summary (bounded)
-9) Strict JSON Output Envelopes (One per model turn)
-9.1 Tool call
-json
-Copy
-{ "type": "tool_call", "tool": "apply_patch", "arguments": { "path": "apps/engine/src/x.ts", "patch": "@@ ..." } }
-9.2 Clarifying question
-json
-Copy
-{ "type": "question", "message": "Confirm the default test command?", "choices": ["pnpm test", "pnpm test:unit"] }
-9.3 Final
-json
-Copy
-{ "type": "final", "message": "Plan updated at .tide/features/feature_x.json." }
-Any other output is rejected with schema errors + retry instruction.
+├── Orchestrator: Idle → Routing → Planning → Building → Reviewing → Complete
+├── Spawns: pi --mode rpc -e tide-safety.ts -e tide-project.ts -e tide-router.ts
+├── stdin → JSON commands to Pi (prompt, abort, ui_response, set_model)
+├── stdout → JSON events from Pi (text_delta, tool_execution_*, ui_request)
+├── Native services: FS ops, Keychain, Git, cost tracking
+└── Emits Tauri events to React
 
-10) Tools vs Skills vs Extensions (Pi-Parity Surface)
-10.1 Definitions
-Tool: low-level deterministic operation with strict schema + safety level (file read, patch apply, command exec).
-Skill: higher-level capability composed of tools (e.g., “Generate tests for task P2.T3”).
-Extension: packaged distribution of engine-only skills (and optional configuration/templates) with a manifest + permissions.
-v0.x constraint: extensions cannot add UI panels or modify the UI.
-10.2 Tool inventory (v0.1 minimum)
-Read-only:
+Pi (RPC mode)
+├── Built-in tools: read, write, edit, bash, grep, find, ls
+├── LLM providers: Anthropic, OpenAI, Google, etc. (15+)
+├── Sessions: JSONL tree structure, auto-compaction, branching
+└── Extensions:
+    ├── tide-safety.ts     (tool_call → approval gate)
+    ├── tide-project.ts    (.tide/ context injection, tide_tags tool, project memory)
+    ├── tide-router.ts     (task classification → model selection)
+    └── tide-planner.ts    (complex tasks → .tide/features/ plan generation)
 
-fs_list, fs_read, fs_stat
-ripgrep
-git_status, git_diff, git_log
-Write (approval gated by default):
+React UI
+├── Listens to "pi_event" Tauri events
+├── Renders: streaming text, tool calls, approval dialogs, diffs
+├── File tree / Monaco editor via Tauri native FS
+├── Command Palette (Cmd+Shift+P), Settings, Terminal
+└── Orchestration progress, plan viewer, cost indicator
+```
 
-apply_patch
-fs_write
-Commands (disabled by default; direct-exec only):
+### 3.2 Orchestration Flow
 
-run_command (see §14)
-10.3 Skills system (required)
-Tide Engine contains a SkillRegistry:
-id, description
-inputs_schema, outputs_schema
-implementation: TS module OR “LLM-driven skill template” that results in Tide tool calls
-permissions: allowed underlying tools + command allowlist constraints
-Skills can be invoked by:
-orchestrator internally
-user via command palette (“Run Skill…”)
-Pi backend via compatibility mapping (never bypassing safety)
-11) Extensions: Global + Workspace-Local (Decision Locked)
-11.1 Locations
-Global extensions: ~/.tide/extensions
-Workspace-local extensions: <repo>/.tide/extensions
-11.2 Precedence and overrides
-If the same extension_id is present in both:
-workspace-local wins
-UI must clearly show source (“Workspace” vs “Global”)
-11.3 Trust and safety defaults (supply-chain aware)
-Workspace-local extensions are disabled by default until the user explicitly enables them for that workspace.
-Extension manifest declares required permissions:
-tool access
-command allowlists
-any network capability (off by default in v0.x)
-GPT-5.2 Thinking
-Update locked: extensions are skills/tools only (engine-only)
-Locked in for v0.x: extensions may contribute skills (and any underlying tool wrappers they are permitted to call), but no UI panels, no UI contributions, no custom React components.
+```
+User Prompt
+    │
+    ▼
+  Router (classify task difficulty)
+    │
+    ├─ quick ──────► Direct Pi prompt (fast model)
+    │                    │
+    │                    ▼
+    │                 Response
+    │
+    ├─ standard ───► Direct Pi prompt (standard model)
+    │                    │
+    │                    ▼
+    │                 Response
+    │
+    └─ complex ────► Planner (powerful model)
+                         │
+                         ▼
+                     .tide/features/<slug>.json
+                         │
+                         ▼
+                     Builder (step-by-step, per plan step)
+                         │
+                         ▼
+                     Reviewer (check code, run tests)
+                         │
+                         ▼
+                     Changeset summary + approval
+```
 
-Below are the exact edits to apply to .tide/PROJECT.md (v0.6 → v0.7).
+The orchestration state machine lives in **Rust** — it manages the Pi process, spawns sequential prompts with different system prompts and models for each phase. This gives full control over multi-step workflows.
 
-1) Replace §10 “Tools vs Skills vs Extensions” definitions with this
-10.1 Definitions
-Tool: low-level deterministic operation with strict schema + safety level (file read, patch apply, command exec).
-Skill: higher-level capability composed of tools (e.g., “Generate tests for task P2.T3”).
-Extension: packaged distribution of engine-only skills (and optional configuration/templates) with a manifest + permissions.
-v0.x constraint: extensions cannot add UI panels or modify the UI.
-2) Add this to §11 (Extensions) as an explicit rule
-11.4 Engine-only extensions (v0.x)
-Extensions are limited to:
-registering skills in the SkillRegistry
-providing prompt templates / skill logic (TS modules)
-declaring permissions (tools + command allowlists)
-Extensions cannot:
-add UI panels/tabs
-inject UI components
-alter layout or editor behavior directly
-12) Context Management (Long Tasks) + Context Status Dial
-12.1 ContextPack
-Engine builds a ContextPack per step from:
+### 3.3 Authority Model
 
-pinned .tide docs
-active feature plan task(s) + acceptance criteria
-selected/tagged regions
-bounded file snippets (not entire files by default)
-repo map summary (bounded)
-session summary (bounded)
-Large artifacts are referenced by pointer and pulled on-demand.
+- **Pi** owns: tool execution, LLM interaction, session management, agent loop
+- **Tide Rust** owns: orchestration state, Pi process lifecycle, native services (FS, Keychain, Git)
+- **Tide extensions** own: safety policy, context injection, project memory, task routing
+- **UI** owns: user intent, approvals/denials, file browsing/editing, settings
 
-12.2 Context budget policy
-Each role gets a target budget derived from selected model context window + user “cost vs quality.”
-When over budget, trim in order:
-old chat history
-repo map verbosity
-non-pinned attachments
-Never trim:
-critical rules from TIDE.md
-active task acceptance criteria
-safety policy constraints
-12.3 Context Status Dial (must-have)
-Bottom status bar shows:
+### 3.4 IPC
 
-% budget used (e.g., 62%)
-green/yellow/red thresholds (<70 / 70–90 / >90)
-hover breakdown (estimated tokens):
-.tide docs
-active plan
-attachments
-repo map
-session summary
-Click opens Context Inspector:
+- **Tauri ↔ Pi**: JSON lines over stdin/stdout (Pi RPC protocol)
+- **Tauri ↔ React**: Tauri events (`pi_event`, `pi_ui_request`) + invoke commands
 
-list of context items with size estimates
-pin/unpin toggles
-engine “trim suggestions”
-“simulate next step budget” per role (Planner/Builder/Validator)
-13) Tests: Discovery Policy (Hybrid)
-Tide scans repo to suggest test commands (e.g., package.json scripts).
-UI asks user to confirm.
-Confirmed commands are written into TIDE.md.
-From then on: TIDE.md is source of truth (deterministic).
-14) Command Execution Surface (Direct Exec Only)
-run_command is direct exec only (no shell features):
+## 4) The .tide/ Ecosystem
 
-cmd: program name
-args: string[]
-cwd: workspace-relative
-timeout_ms: enforced
-env_whitelist: optional
-Safety:
+Durable project context lives in `.tide/` (repo-local, version-controllable):
 
-disabled by default per workspace
-allowlist commands in TIDE.md
-approvals required unless explicitly relaxed
-15) Streaming Output (Fast “token feel” without jank)
-Stream delta chunks, not per-token IPC.
-UI renders at most ~30–60 updates/sec (16–50ms flush).
-Message pattern: start | delta | end with request_id, stream_id, seq.
-Node↔Rust transport: framed socket.
-Rust→UI: Tauri events, coalesced.
-16) Cancellation Semantics (Decision Locked: Option B)
-Cancel must stop the current work reliably without pretending to rollback history.
+```
+.tide/
+├── tags/tags.json           # Region tags — pinned code sections across sessions
+├── features/                # Feature plans from Planner agent
+│   └── <slug>.json          #   { slug, title, steps: [{ id, desc, status, files }] }
+├── sessions/                # Session summaries
+│   └── <timestamp>.md       #   What was accomplished, files changed, decisions made
+├── memory.json              # Project memory — learned facts, conventions, decisions
+├── repo-map.md              # Auto-generated project structure summary
+├── skills/                  # Workspace-local skill extensions
+├── phases/                  # Phase files tracking project milestones
+└── tide.db                  # Legacy SQLite (to be removed)
+```
 
-16.1 What “Cancel” does
-On user cancel:
+**TIDE.md** (workspace root): Safety policy, command allowlist, test commands, project conventions.
 
-Immediately stop LLM streaming
-engine stops forwarding deltas
-provider request is aborted if supported
-Prevent starting any new tool calls for the current step
-Attempt to cancel the currently running tool, if any
-16.2 Tool-specific cancellation behavior
-run_command:
-terminate the process (graceful kill, then force kill if needed)
-capture partial stdout/stderr and record cancelled=true
-ripgrep and other short-lived processes:
-terminate similarly (usually instant)
-apply_patch / fs_write:
-treated as atomic; cancellation won’t “half-apply”
-no automatic rollback in v0.1
-16.3 No rollback (explicit)
-Cancellation does not attempt to revert code changes automatically. Any changes already applied remain visible as diffs/artifacts.
+## 5) Pi Extensions
 
-UI must show:
+### tide-safety.ts
+- Intercepts `tool_call` events, classifies tools (read/write/command)
+- Reads TIDE.md for safety config (approval policy, command allowlist)
+- For write/edit tools: captures file content before change, includes in approval payload for diff preview
+- Uses `ctx.ui.confirm()` for approval dialogs with diff data
+- Returns `{ block: true, reason }` to deny
 
-what was cancelled (stream vs tool)
-which tool was running
-partial outputs captured so far
-17) IPC Transport (Default for scaffold)
-Node ↔ Rust: framed socket protocol (UDS macOS; TCP localhost fallback)
-Rust ↔ UI: Tauri events (stream) + invoke (request/response)
-18) No RAG Policy (Explicit)
-Tide does not use embedding-based RAG as a memory store for:
-tasks
-project direction
-“overall intent”
-Canonical sources are:
-.tide/PROJECT.md, TIDE.md, .tide/features/*.json
-SQLite session/task logs
-Retrieval in v0.1 is deterministic:
-ripgrep + explicit file reads + repo map summaries
-(Future) semantic search may exist only as an explicit tool with citations and user pinning, but is out of scope for v0.1.
-19) Milestones (Including extensions + cancellation)
-M0 (1–2 days): skeleton
+### tide-project.ts
+- Ensures `.tide/` directory structure on session start
+- Injects into system prompt via `before_agent_start`:
+  - TIDE.md content (always)
+  - Pinned region tags (always)
+  - Repo map summary (if available)
+  - Recent session summaries (if available)
+  - Relevant project memory entries (if available)
+- Registers custom tools: `tide_tags` (region tag CRUD), `tide_memory` (project memory read/write)
 
-Tauri window
-sidecar spawn + handshake
-streaming demo: start/delta/end with coalescing
-M1 (week 1): workspace + navigation
+### tide-router.ts
+- Intercepts `before_agent_start` hook
+- Classifies task difficulty: `quick` (question, small edit), `standard` (feature implementation), `complex` (multi-file architecture)
+- Sets model via Pi API: quick → fast model, standard → balanced model, complex → powerful model
+- Emits `routing_decision` event to UI
 
-open folder, file tree, Monaco tabs
-fs_list/fs_read end-to-end
-M2 (week 2): region tagging + context dial
+### tide-planner.ts
+- Activated for `complex` tasks by the orchestrator
+- Generates structured plan: `.tide/features/<slug>.json`
+- Plan format: steps with descriptions, target files, acceptance criteria
+- Plan visible in UI via Plan Viewer tab
 
-tag ranges, attach to prompt, persist
-Context Status Dial + Context Inspector v0
-M3 (weeks 3–4): strict tools + patching + approvals
+## 6) Tauri Commands (Rust)
 
-tool registry + schemas
-apply_patch + diff preview + approvals
-tool logging
-M4 (weeks 5–6): Plan → Execute → Validate
+### Current
+| Command | Purpose |
+|---------|---------|
+| `send_prompt(text)` | Send prompt to Pi agent |
+| `abort_agent()` | Abort current Pi operation |
+| `get_pi_status()` | Check Pi connection status |
+| `get_pi_state()` | Request Pi state (model, session) |
+| `respond_ui_request(id, confirmed)` | Respond to extension approval dialog |
+| `open_workspace(path)` | Set workspace root + list directory |
+| `fs_list_dir(path)` | List directory (Rust native) |
+| `fs_read_file(path)` | Read file + detect language (Rust native) |
 
-Planner writes .tide/features/*.json
-Builder executes tasks from plan
-Validator runs tests + verifies acceptance
-M5 (weeks 7–8): providers + router
+### Planned
+| Command | Purpose | Phase |
+|---------|---------|-------|
+| `keychain_set_key/get_key/delete_key` | macOS Keychain for API keys | 5 |
+| `git_status/git_branch` | Git integration | 5 |
+| `set_pi_model(model)` | Forward model switch to Pi | 6 |
+| `orchestrate(prompt)` | Start orchestrated multi-agent flow | 8 |
 
-adapters for OpenAI/Anthropic/GLM/Qwen/MiniMax
-router UI + budgets
-M6 (next): Pi parity layer + extensions
+## 7) Non-Negotiables
 
-SkillRegistry + extension manifest support (engine-only)
-extension loading global + workspace-local (with trust gating)
-Pi adapter for Builder backend + skills mapping
-“Run Skill…” command palette (built-in UI only; extensions do not ship UI)
+- **Pi as core engine**: All coding reasoning, tool calling, and LLM interaction goes through Pi in RPC mode
+- **Safety via extensions**: Write/command operations require approval unless relaxed in TIDE.md
+- **Durable context in `.tide/`**: Project memory, region tags, plans, and safety config live in `.tide/`
+- **No Python required**: Everything in TypeScript (Pi extensions) + Rust (Tauri shell)
+- **Artifacts over narration**: Truth = tool execution results, diffs, file changes, test results
+- **Cost transparency**: Token usage and estimated cost visible at all times
+- **User always in control**: No auto-approve; orchestration is opt-in; user can always send direct prompts
+- **Glass-box context**: User can inspect exactly what context the agent sees
 
-SkillRegistry + extension manifest support
-extension loading global + workspace-local (with trust gating)
-Pi adapter for Builder backend + skills mapping
-“Run Skill…” command palette
-20) Locked Decisions (Current)
-React UI + Monaco
-Node.js TypeScript sidecar engine
-Strict JSON only
-Tests: hybrid discovery → confirm → write to TIDE.md
-Commands: direct exec only
-Streaming: delta chunks + throttled UI updates
-Cancellation: Option B (cancel stream + cancel active tool; no rollback)
-Extensions: both global and workspace-local, workspace overrides global, workspace-local disabled by default until trusted
-No RAG for direction/tasks; .tide + SQLite are canonical
-Pi: delegated backend option; Tide remains authority
-Context Status Dial + Context Inspector are first-class UX
-Extensions: skills/tools only (engine-only) for v0.x; no UI extension surfaces
+## 8) Tech Stack
+
+- **Desktop**: Tauri v2 (Rust)
+- **UI**: React 19 + Vite + Zustand 5 + Monaco Editor
+- **Engine**: Pi coding agent (`@mariozechner/pi-coding-agent`) in RPC mode
+- **Extensions**: TypeScript (Pi extension API)
+- **Types**: Zod (shared), TypeBox (Pi tools)
+- **Native**: `security-framework` (Keychain), `git2` (Git), `tokio` (async)
+
+## 9) Phased Roadmap
+
+### Completed
+- **Phases 1-3**: Initial skeleton — Tauri app, React UI, file tree, Monaco editor, region tags (original custom engine, since archived)
+- **Phase 4**: Pi integration pivot — replaced custom engine with Pi RPC, rewrote Rust IPC, rewired React, created safety and project extensions
+
+### Phase 5: Pi-Independent IDE Polish (no Pi required)
+Command Palette (Cmd+Shift+P), Settings panel + API key management (macOS Keychain), diff preview in approval dialogs, git status in status bar, markdown rendering in agent chat.
+
+### Phase 6: Wire Pi Features (requires Pi available)
+Connect ContextDial to Pi state, wire LogsTab to tool execution events, wire region tags to Pi tide_tags tool, model picker in status bar, wire diff preview to approval flow.
+
+### Phase 7: Router + Task Classification
+tide-router.ts extension for task difficulty classification and model selection, router status UI, feature plan generator (tide-planner.ts), plan viewer panel, cost tracker.
+
+### Phase 8: Multi-Agent Orchestration
+Rust orchestration state machine (Idle→Routing→Planning→Building→Reviewing→Complete), step-by-step builder execution, reviewer phase, orchestration progress UI, multi-file change viewer.
+
+### Phase 9: Skills + Extensibility
+Skill registration framework, built-in skills (test discovery, explain code, refactor), repo map generator, skill management UI.
+
+### Phase 10: Session Intelligence + Project Memory
+Session summary generation, project memory store (.tide/memory.json + tide_memory tool), smart context injection, session history UI, project dashboard.
+
+## 10) Success Criteria
+
+A developer opens Tide, types "Build a REST API for user management with auth, tests, and documentation." Tide:
+
+1. **Routes** it as a complex task, selects a powerful model
+2. **Plans** — generates a structured plan in `.tide/features/user-api.json` with steps
+3. **Builds** — executes each step with approval gates, showing diffs before writes
+4. **Reviews** — runs tests, checks compilation, reports issues
+5. **Presents** — shows a changeset summary with per-file diffs for final approval
+
+Throughout, the developer sees: the orchestration pipeline progress, the context budget, the cost so far, and every tool call with its result. They can pause, override the model, edit the plan, or take manual control at any point.
+
+That's Tide — transparent, controllable, orchestrated agentic coding.

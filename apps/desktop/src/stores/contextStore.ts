@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { invoke } from "@tauri-apps/api/core";
 
 export type ThresholdColor = "green" | "yellow" | "red";
 
@@ -48,37 +47,23 @@ interface ContextState {
   closeInspector: () => void;
 }
 
-export const useContextStore = create<ContextState>((set, get) => ({
+// TODO: Rewire to Pi's get_state response in Phase 5.
+// Context management is now handled by Pi's session system.
+export const useContextStore = create<ContextState>((set) => ({
   breakdown: null,
   contextPack: null,
   inspectorOpen: false,
 
   refreshBreakdown: async () => {
-    try {
-      const breakdown = await invoke<BudgetBreakdown>("context_get_breakdown");
-      set({ breakdown });
-    } catch (err) {
-      console.error("[contextStore] Failed to refresh breakdown:", err);
-    }
+    // No-op: Pi manages context internally. Will be wired to Pi get_state in Phase 5.
   },
 
   refreshItems: async () => {
-    try {
-      const contextPack = await invoke<ContextPack>("context_get_items");
-      set({ contextPack });
-    } catch (err) {
-      console.error("[contextStore] Failed to refresh items:", err);
-    }
+    // No-op: Pi manages context internally. Will be wired to Pi get_state in Phase 5.
   },
 
-  togglePin: async (id: string) => {
-    try {
-      await invoke("context_toggle_pin", { id });
-      // Refresh both breakdown and items
-      await Promise.all([get().refreshBreakdown(), get().refreshItems()]);
-    } catch (err) {
-      console.error("[contextStore] Failed to toggle pin:", err);
-    }
+  togglePin: async (_id: string) => {
+    // No-op: Region-based pinning will be handled via Pi's tide_tags tool in Phase 5.
   },
 
   openInspector: () => set({ inspectorOpen: true }),

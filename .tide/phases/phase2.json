@@ -2,7 +2,8 @@
   "project": "Tide IDE — Agentic Coding Environment",
   "phase": 2,
   "name": "M1: Workspace + Navigation",
-  "description": "Open folder, file tree browsing, Monaco editor with tabs, and fs_list/fs_read tools working end-to-end through IPC.",
+  "description": "HISTORICAL — Workspace navigation, file tree, Monaco editor. UI components still in use; engine IPC since replaced by Pi integration in Phase 4.",
+  "archived": true,
   "created": "2026-03-03",
   "notes": [
     "File tree uses lazy loading — only loads children when directory is expanded.",
