@@ -1,0 +1,68 @@
+.tree {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  user-select: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  padding: 4px 0;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: var(--radius-sm);
+  margin: 0 4px;
+}
+
+.item:hover {
+  background: var(--bg-tertiary);
+}
+
+.itemActive {
+  background: rgba(0, 122, 204, 0.2);
+}
+
+.itemActive:hover {
+  background: rgba(0, 122, 204, 0.3);
+}
+
+.chevron {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  transition: transform 0.1s ease;
+  color: var(--text-secondary);
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.chevronPlaceholder {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+}
+
+.dirName {
+  color: var(--text-bright);
+  font-weight: 500;
+}

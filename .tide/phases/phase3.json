@@ -21,7 +21,7 @@
       "files": [
         "apps/engine/src/persistence/sqlite.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -32,7 +32,7 @@
         "packages/shared/src/types/region-tag.ts",
         "apps/engine/src/persistence/region-tags.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -43,7 +43,7 @@
         "packages/shared/src/protocol.ts",
         "apps/engine/src/ipc/handler.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -53,7 +53,7 @@
       "files": [
         "apps/desktop/src/components/Editor/useRegionTags.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -64,7 +64,7 @@
         "apps/desktop/src/components/Editor/RegionTagPopover.tsx",
         "apps/desktop/src/components/Editor/RegionTagPopover.module.css"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -74,7 +74,7 @@
       "files": [
         "apps/desktop/src/stores/regionTagStore.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "medium"
     },
     {
@@ -85,7 +85,7 @@
         "apps/engine/src/context/context-pack.ts",
         "apps/engine/src/context/context-builder.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -97,7 +97,7 @@
         "apps/engine/src/context/budget-tracker.ts",
         "apps/engine/src/context/context-config.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -107,7 +107,7 @@
       "files": [
         "apps/engine/src/context/region-resolver.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "medium"
     },
     {
@@ -119,7 +119,7 @@
         "apps/engine/src/ipc/handler.ts",
         "apps/desktop/src/stores/contextStore.ts"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -131,7 +131,7 @@
         "apps/desktop/src/components/StatusBar/ContextDialTooltip.tsx",
         "apps/desktop/src/components/StatusBar/ContextDial.module.css"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "high"
     },
     {
@@ -142,7 +142,7 @@
         "apps/desktop/src/components/ContextInspector/ContextInspector.tsx",
         "apps/desktop/src/components/ContextInspector/ContextInspector.module.css"
       ],
-      "status": "pending",
+      "status": "done",
       "priority": "medium"
     }
   ]

@@ -10,4 +10,5 @@ export default defineConfig({
   splitting: false,
   dts: false,
   noExternal: ["@tide/shared"],
+  external: ["better-sqlite3"],
 });

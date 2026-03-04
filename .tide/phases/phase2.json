@@ -21,7 +21,7 @@
         "apps/engine/src/tools/fs_list.ts",
         "apps/engine/src/ipc/handler.ts"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -32,7 +32,7 @@
         "apps/engine/src/tools/fs_read.ts",
         "apps/engine/src/ipc/handler.ts"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -43,7 +43,7 @@
         "apps/desktop/src-tauri/src/lib.rs",
         "apps/desktop/src-tauri/capabilities/default.json"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -53,7 +53,7 @@
       "files": [
         "apps/desktop/src/stores/workspace.ts"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -65,7 +65,7 @@
         "apps/desktop/src/components/FileTree/FileTree.module.css",
         "apps/desktop/src/components/FileTree/FileIcon.tsx"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -75,7 +75,7 @@
       "files": [
         "apps/desktop/src/components/Editor/MonacoEditor.tsx"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -86,7 +86,7 @@
         "apps/desktop/src/components/Editor/EditorTabs.tsx",
         "apps/desktop/src/components/Editor/EditorTabs.module.css"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -97,7 +97,7 @@
         "apps/desktop/src/components/Layout/SplitPane.tsx",
         "apps/desktop/src/components/Layout/SplitPane.module.css"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "medium"
     },
     {
@@ -108,7 +108,7 @@
         "apps/desktop/src/App.tsx",
         "apps/desktop/src/components/AgentPanel/AgentPanel.tsx"
       ],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -116,7 +116,7 @@
       "title": "Wire open folder flow end-to-end",
       "description": "Complete the open folder flow: user clicks 'Open Folder' button -> Tauri native dialog -> path stored in workspace store -> fs_list for root directory populates file tree -> user can browse, expand directories, click files -> fs_read loads content -> Monaco displays file with correct language. Test with various repo structures including the tide_code project itself. Ensure the streaming demo still works in the right panel.",
       "files": [],
-      "status": "pending",
+      "status": "completed",
       "priority": "high"
     }
   ]

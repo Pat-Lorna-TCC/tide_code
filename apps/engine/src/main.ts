@@ -2,6 +2,7 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import { Transport } from "./ipc/transport.js";
 import { handleMessage } from "./ipc/handler.js";
+import { closeDb } from "./persistence/sqlite.js";
 
 function parseArgs(): { socket: string } {
   const args = process.argv.slice(2);
@@ -46,6 +47,7 @@ server.listen(socketPath, () => {
 
 process.on("SIGTERM", () => {
   console.log("[engine] SIGTERM received, shutting down");
+  closeDb();
   server.close();
   cleanupSocket(socketPath);
   process.exit(0);
@@ -53,6 +55,7 @@ process.on("SIGTERM", () => {
 
 process.on("SIGINT", () => {
   console.log("[engine] SIGINT received, shutting down");
+  closeDb();
   server.close();
   cleanupSocket(socketPath);
   process.exit(0);

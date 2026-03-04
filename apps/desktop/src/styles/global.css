@@ -89,3 +89,29 @@ body {
   outline: 1px solid var(--border-focus);
   outline-offset: -1px;
 }
+
+/* ── Region tag decorations (Monaco) ─────────────── */
+.region-tag-pinned {
+  background: rgba(0, 122, 204, 0.15);
+  border-left: 2px solid var(--accent);
+}
+.region-tag-unpinned {
+  background: rgba(133, 133, 133, 0.08);
+  border-left: 2px solid rgba(133, 133, 133, 0.3);
+}
+.region-tag-glyph {
+  background: var(--accent);
+  border-radius: 50%;
+  width: 6px !important;
+  height: 6px !important;
+  margin-top: 7px;
+  margin-left: 4px;
+}
+.region-tag-glyph-stale {
+  background: var(--warning);
+  border-radius: 50%;
+  width: 6px !important;
+  height: 6px !important;
+  margin-top: 7px;
+  margin-left: 4px;
+}

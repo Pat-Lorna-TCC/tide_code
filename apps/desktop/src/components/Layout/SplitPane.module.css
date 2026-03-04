@@ -1,0 +1,60 @@
+.container {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.vertical {
+  flex-direction: row;
+}
+
+.horizontal {
+  flex-direction: column;
+}
+
+.pane {
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.handle {
+  flex-shrink: 0;
+  background: var(--border);
+  z-index: 1;
+}
+
+.handleVertical {
+  width: 1px;
+  cursor: col-resize;
+  position: relative;
+}
+
+.handleVertical::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -2px;
+  right: -2px;
+  bottom: 0;
+}
+
+.handleHorizontal {
+  height: 1px;
+  cursor: row-resize;
+  position: relative;
+}
+
+.handleHorizontal::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -2px;
+  right: 0;
+  bottom: -2px;
+}
+
+.handle:hover,
+.handleDragging {
+  background: var(--accent);
+}

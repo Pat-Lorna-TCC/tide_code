@@ -1,65 +1,86 @@
-import { useState, useEffect, useRef } from "react";
-import { useStreamStore } from "./stores/stream";
+import { useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEngineStore } from "./stores/engine";
-import { sendMessage } from "./lib/ipc";
+import { useWorkspaceStore, type FsEntry } from "./stores/workspace";
+import { useUiStore } from "./stores/ui";
+import { SplitPane } from "./components/Layout/SplitPane";
+import { GlobalLoader } from "./components/GlobalLoader";
+import { FileTree } from "./components/FileTree/FileTree";
+import { EditorTabs } from "./components/Editor/EditorTabs";
+import { MonacoEditor } from "./components/Editor/MonacoEditor";
+import { AgentPanel } from "./components/AgentPanel/AgentPanel";
+import { ContextDial } from "./components/StatusBar/ContextDial";
+import { ContextInspector } from "./components/ContextInspector/ContextInspector";
 import "./styles/global.css";
 
-export function App() {
-  const [input, setInput] = useState("");
-  const { content, isStreaming, handleEvent, reset } = useStreamStore();
-  const { status, setStatus } = useEngineStore();
-  const outputRef = useRef<HTMLDivElement>(null);
+interface RawFsEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory" | "symlink";
+  size?: number;
+}
 
-  // Check engine status on mount
+function toFsEntries(raw: RawFsEntry[]): FsEntry[] {
+  return raw.map((e) => ({
+    name: e.name,
+    path: e.path,
+    isDir: e.type === "directory",
+    size: e.size,
+  }));
+}
+
+export function App() {
+  const { status, setStatus } = useEngineStore();
+  const { rootPath, setRootPath, setFileTree, openTabs, activeTabPath, updateTabContent } =
+    useWorkspaceStore();
+  const { startLoading, stopLoading } = useUiStore();
+
+  // Poll engine status
   useEffect(() => {
     let cancelled = false;
-    const checkStatus = async () => {
+    const check = async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
         const result = await invoke<string>("get_engine_status");
-        if (!cancelled) {
-          setStatus(result === "connected" ? "connected" : "disconnected");
-        }
+        if (!cancelled) setStatus(result === "connected" ? "connected" : "disconnected");
       } catch {
         if (!cancelled) setStatus("disconnected");
       }
     };
-
-    // Poll until connected
-    const interval = setInterval(checkStatus, 1000);
-    checkStatus();
+    const interval = setInterval(check, 1000);
+    check();
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
   }, [setStatus]);
 
-  // Auto-scroll output
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
-  }, [content]);
-
-  const handleSend = async () => {
-    if (!input.trim() || isStreaming) return;
-    const msg = input.trim();
-    setInput("");
-    reset();
-
+  const handleOpenFolder = useCallback(async () => {
     try {
-      await sendMessage(msg, handleEvent);
-    } catch (err) {
-      console.error("Send failed:", err);
-    }
-  };
+      console.log("[Tide] Opening folder dialog...");
+      const selected = await open({ directory: true, title: "Open Folder" });
+      console.log("[Tide] Dialog result:", selected);
+      if (!selected) return; // User cancelled
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      handleSend();
+      const folderPath = typeof selected === "string" ? selected : selected[0];
+      if (!folderPath) return;
+
+      startLoading("Opening workspace...");
+      try {
+        const entries = await invoke<RawFsEntry[]>("open_workspace", { path: folderPath });
+        console.log("[Tide] Workspace opened, entries:", entries?.length);
+        setRootPath(folderPath);
+        setFileTree(toFsEntries(entries));
+      } finally {
+        stopLoading();
+      }
+    } catch (err) {
+      console.error("[Tide] Open folder failed:", err);
+      stopLoading();
     }
-  };
+  }, [setRootPath, setFileTree, startLoading, stopLoading]);
+
+  const activeTab = openTabs.find((t) => t.path === activeTabPath);
 
   const statusColor =
     status === "connected"
@@ -69,63 +90,91 @@ export function App() {
         : "var(--text-secondary)";
 
   return (
-    <div style={styles.container}>
+    <div style={s.container}>
+      <GlobalLoader />
       {/* Top status bar */}
-      <div style={styles.topBar}>
-        <span style={styles.title}>Tide</span>
-        <span style={{ ...styles.statusDot, background: statusColor }} />
-        <span style={styles.statusText}>
-          Engine: {status}
-        </span>
+      <div style={s.topBar}>
+        <span style={s.title}>Tide</span>
+        <span style={{ ...s.statusDot, background: statusColor }} />
+        <span style={s.statusText}>Engine: {status}</span>
+        <div style={{ flex: 1 }} />
+        {!rootPath && (
+          <button style={s.openBtn} onClick={handleOpenFolder}>
+            Open Folder
+          </button>
+        )}
       </div>
 
-      {/* Main content */}
-      <div style={styles.main}>
-        {/* Output area */}
-        <div ref={outputRef} style={styles.output}>
-          {content ? (
-            <pre style={styles.outputText}>{content}</pre>
-          ) : (
-            <p style={styles.placeholder}>
-              Send a message to test streaming...
-            </p>
-          )}
-          {isStreaming && <span style={styles.cursor}>|</span>}
-        </div>
+      {/* Main content area */}
+      <div style={s.main}>
+        {rootPath ? (
+          /* File Tree | Editor | Agent Panel */
+          <SplitPane direction="vertical" initialSize={250} minSize={150} maxSize={500}>
+            {/* Left sidebar: File Tree */}
+            <div style={s.sidebar}>
+              <div style={s.sidebarHeader}>
+                <span>Explorer</span>
+                <button style={s.openBtn} onClick={handleOpenFolder} title="Open Folder">
+                  ...
+                </button>
+              </div>
+              <FileTree />
+            </div>
 
-        {/* Input area */}
-        <div style={styles.inputArea}>
-          <textarea
-            style={styles.textarea}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message... (Cmd+Enter to send)"
-            rows={2}
-            disabled={isStreaming}
-          />
-          <button
-            style={{
-              ...styles.button,
-              opacity: isStreaming || !input.trim() ? 0.5 : 1,
-            }}
-            onClick={handleSend}
-            disabled={isStreaming || !input.trim()}
-          >
-            {isStreaming ? "Streaming..." : "Send"}
-          </button>
-        </div>
+            {/* Editor + Agent Panel */}
+            <SplitPane direction="vertical" initialSize={350} minSize={250} maxSize={600} side="end">
+              {/* Center: Editor area */}
+              <div style={s.editorArea}>
+                <EditorTabs />
+                <div style={s.editorContent}>
+                  {activeTab ? (
+                    <MonacoEditor
+                      content={activeTab.content}
+                      language={activeTab.language}
+                      path={activeTab.path}
+                      readOnly={true}
+                      onChange={(value) => updateTabContent(activeTab.path, value)}
+                    />
+                  ) : (
+                    <div style={s.emptyEditor}>
+                      <p>Open a file from the explorer</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right: Agent Panel */}
+              <AgentPanel />
+            </SplitPane>
+          </SplitPane>
+        ) : (
+          <div style={s.welcome}>
+            <h2 style={s.welcomeTitle}>Welcome to Tide</h2>
+            <p style={s.welcomeText}>Open a folder to get started</p>
+            <button style={s.welcomeBtn} onClick={handleOpenFolder}>
+              Open Folder
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Bottom status bar */}
-      <div style={styles.bottomBar}>
-        <span style={styles.bottomText}>Tide v0.1.0</span>
+      <div style={s.bottomBar}>
+        <span>Tide v0.1.0</span>
+        {rootPath && (
+          <span style={s.rootPathLabel}>{rootPath.split("/").pop()}</span>
+        )}
+        <div style={{ flex: 1 }} />
+        <ContextDial />
       </div>
+
+      {/* Context Inspector overlay */}
+      <ContextInspector />
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const s: Record<string, React.CSSProperties> = {
   container: {
     display: "flex",
     flexDirection: "column",
@@ -143,71 +192,66 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: "1px solid var(--border)",
     fontSize: "var(--font-size-sm)",
   },
-  title: {
-    fontWeight: 600,
-    color: "var(--text-bright)",
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: "50%",
-    marginLeft: 8,
-  },
-  statusText: {
-    color: "var(--text-secondary)",
+  title: { fontWeight: 600, color: "var(--text-bright)" },
+  statusDot: { width: 6, height: 6, borderRadius: "50%", marginLeft: 8 },
+  statusText: { color: "var(--text-secondary)", fontSize: "var(--font-size-xs)" },
+  openBtn: {
+    padding: "2px 8px",
+    fontFamily: "var(--font-ui)",
     fontSize: "var(--font-size-xs)",
+    color: "var(--text-primary)",
+    background: "transparent",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    cursor: "pointer",
   },
-  main: {
-    flex: 1,
+  main: { flex: 1, overflow: "hidden" },
+  sidebar: {
     display: "flex",
     flexDirection: "column",
-    padding: 16,
-    gap: 12,
+    height: "100%",
+    background: "var(--bg-secondary)",
+  },
+  sidebarHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    height: 32,
+    padding: "0 12px",
+    fontSize: "var(--font-size-xs)",
+    fontWeight: 600,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.5px",
+    color: "var(--text-secondary)",
+    borderBottom: "1px solid var(--border)",
+  },
+  editorArea: {
+    display: "flex",
+    flexDirection: "column",
+    height: "100%",
     overflow: "hidden",
   },
-  output: {
-    flex: 1,
-    overflow: "auto",
-    padding: 12,
-    background: "var(--bg-secondary)",
-    borderRadius: "var(--radius-md)",
-    border: "1px solid var(--border)",
-  },
-  outputText: {
-    fontFamily: "var(--font-mono)",
-    fontSize: "var(--font-size-md)",
-    whiteSpace: "pre-wrap",
-    wordBreak: "break-word",
-    margin: 0,
-    lineHeight: 1.5,
-  },
-  placeholder: {
+  editorContent: { flex: 1, overflow: "hidden" },
+  emptyEditor: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: "100%",
     color: "var(--text-secondary)",
     fontStyle: "italic",
   },
-  cursor: {
-    color: "var(--accent)",
-    animation: "blink 1s step-end infinite",
-  },
-  inputArea: {
+  welcome: {
     display: "flex",
-    gap: 8,
-    alignItems: "flex-end",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    height: "100%",
+    gap: 16,
   },
-  textarea: {
-    flex: 1,
-    padding: "8px 12px",
-    fontFamily: "var(--font-mono)",
-    fontSize: "var(--font-size-md)",
-    color: "var(--text-primary)",
-    background: "var(--bg-input)",
-    border: "1px solid var(--border)",
-    borderRadius: "var(--radius-md)",
-    resize: "none",
-    outline: "none",
-  },
-  button: {
-    padding: "8px 20px",
+  welcomeTitle: { fontSize: 24, fontWeight: 300, color: "var(--text-bright)" },
+  welcomeText: { color: "var(--text-secondary)", fontSize: "var(--font-size-lg)" },
+  welcomeBtn: {
+    padding: "8px 24px",
     fontFamily: "var(--font-ui)",
     fontSize: "var(--font-size-md)",
     fontWeight: 500,
@@ -220,6 +264,7 @@ const styles: Record<string, React.CSSProperties> = {
   bottomBar: {
     display: "flex",
     alignItems: "center",
+    gap: 16,
     height: "var(--status-bar-height)",
     padding: "0 12px",
     background: "var(--bg-tertiary)",
@@ -227,5 +272,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "var(--font-size-xs)",
     color: "var(--text-secondary)",
   },
-  bottomText: {},
+  rootPathLabel: { color: "var(--text-primary)" },
 };
