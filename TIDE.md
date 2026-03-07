@@ -3,10 +3,8 @@
 
 ## Safety Policy
 
-approval_policy:
-  read: never          # Read tools never need approval
-  write: always        # Write/edit tools always need approval
-  command: disabled    # Bash/command execution disabled by default
+write_approval: always        # Write/edit tools always need approval
+command_approval: always      # Bash/command execution requires approval
 
 ## Command Allowlist
 # Commands listed here are allowed when command policy is set to "allowlist".

@@ -5,6 +5,7 @@ import { useWorkspaceStore, type FsEntry } from "../../stores/workspace";
 import { fsCreateFile, fsCreateDir, fsRename, fsDelete } from "../../lib/ipc";
 import { ContextMenu, type ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { FileIcon } from "./FileIcon";
+import { showError } from "../../stores/toastStore";
 import styles from "./FileTree.module.css";
 
 interface RawFsEntry {
@@ -143,6 +144,7 @@ function TreeItem({
         ws.refreshFileTree();
       } catch (err) {
         console.error("rename error:", err);
+        showError(`Rename failed: ${err}`);
       }
       setRenamingPath(null);
     },
@@ -161,6 +163,7 @@ function TreeItem({
         useWorkspaceStore.getState().refreshFileTree();
       } catch (err) {
         console.error("create error:", err);
+        showError(`Create failed: ${err}`);
       }
       setCreating(null);
     },
@@ -334,6 +337,7 @@ export function FileTree() {
           ws.refreshFileTree();
         } catch (err) {
           console.error("delete error:", err);
+        showError(`Delete failed: ${err}`);
         }
       },
     });
@@ -354,6 +358,7 @@ export function FileTree() {
         useWorkspaceStore.getState().refreshFileTree();
       } catch (err) {
         console.error("create error:", err);
+        showError(`Create failed: ${err}`);
       }
       setRootCreating(null);
     },

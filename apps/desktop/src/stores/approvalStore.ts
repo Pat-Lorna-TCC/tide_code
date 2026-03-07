@@ -167,7 +167,19 @@ export function initApprovalListener(): void {
         let filePath = payload.filePath;
         let originalContent = payload.originalContent;
         let newContent = payload.newContent;
-        const toolName = payload.toolName || "";
+        let toolName = payload.toolName || "";
+        let safetyLevel = payload.safetyLevel;
+
+        // Parse tool metadata encoded by tide-safety.ts
+        const metaMatch = message.match(/<!--TIDE_META:(.*?)-->/s);
+        if (metaMatch) {
+          try {
+            const meta = JSON.parse(metaMatch[1]);
+            toolName = meta.toolName || toolName;
+            safetyLevel = meta.safetyLevel || safetyLevel;
+            message = message.replace(/\n<!--TIDE_META:.*?-->/s, "");
+          } catch { /* ignore */ }
+        }
 
         // Parse diff data encoded by tide-safety.ts
         const diffMatch = message.match(/<!--TIDE_DIFF:(.*?)-->/s);
@@ -200,7 +212,7 @@ export function initApprovalListener(): void {
           title: event.title || "Approval Required",
           message,
           toolName,
-          safetyLevel: payload.safetyLevel,
+          safetyLevel,
           filePath,
           originalContent,
           newContent,

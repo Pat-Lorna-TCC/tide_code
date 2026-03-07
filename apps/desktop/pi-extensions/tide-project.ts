@@ -3,6 +3,20 @@ import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+const TOOL_USE_DIRECTIVE =
+  "## Tool Usage Policy\n\n" +
+  "You MUST use tools directly to implement changes. Never describe what you would do — " +
+  "always execute it using the available tools (write, edit, bash, etc.). " +
+  "If a tool call is blocked by the safety system, report the block and move on. " +
+  "Do not preemptively refuse to use tools based on configuration comments.";
+
+function stripSafetyPolicy(content: string): string {
+  let cleaned = content.replace(/## Safety Policy[\s\S]*?(?=\n## |\n# |$)/i, "");
+  cleaned = cleaned.replace(/^(?:write_approval|command_approval|command_policy|command|read|write|git_write|approval_policy):\s*.*$/gim, "");
+  cleaned = cleaned.replace(/## Command Allowlist[\s\S]*?(?=\n## |\n# |$)/i, "");
+  return cleaned.trim();
+}
+
 interface RegionTag {
   id: string;
   filePath: string;
@@ -23,6 +37,71 @@ function ensureTideDir(workspaceRoot: string): void {
   if (!fs.existsSync(tagsDir)) {
     fs.mkdirSync(tagsDir, { recursive: true });
   }
+  const sessionsDir = path.join(tideDir, "sessions");
+  if (!fs.existsSync(sessionsDir)) {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+  }
+}
+
+// ── Project Memory ──────────────────────────────────────────
+
+interface MemoryEntry {
+  key: string;
+  value: string;
+  category?: string;
+  updatedAt: string;
+}
+
+function memoryPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, ".tide", "memory.json");
+}
+
+function loadMemory(workspaceRoot: string): MemoryEntry[] {
+  const p = memoryPath(workspaceRoot);
+  if (!fs.existsSync(p)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveMemory(workspaceRoot: string, entries: MemoryEntry[]): void {
+  fs.writeFileSync(memoryPath(workspaceRoot), JSON.stringify(entries, null, 2), "utf-8");
+}
+
+function formatMemoryForContext(entries: MemoryEntry[]): string {
+  if (entries.length === 0) return "";
+  let ctx = "## Project Memory\n\nLearned facts about this project:\n\n";
+  for (const e of entries) {
+    ctx += `- **${e.key}**${e.category ? ` [${e.category}]` : ""}: ${e.value}\n`;
+  }
+  return ctx;
+}
+
+// ── Session Summaries ───────────────────────────────────────
+
+function sessionsDir(workspaceRoot: string): string {
+  return path.join(workspaceRoot, ".tide", "sessions");
+}
+
+function loadRecentSessions(workspaceRoot: string, count: number): string[] {
+  const dir = sessionsDir(workspaceRoot);
+  if (!fs.existsSync(dir)) return [];
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .sort()
+      .reverse()
+      .slice(0, count);
+    return files.map((f) => fs.readFileSync(path.join(dir, f), "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3.5);
 }
 
 function loadTags(workspaceRoot: string): RegionTag[] {
@@ -78,24 +157,112 @@ export default function tideProject(pi: ExtensionAPI) {
   });
 
   // Inject .tide/ context before each agent conversation
+  // Priority-based injection with token budgeting:
+  //   1. TIDE.md rules (always, never trimmed)
+  //   2. Pinned region tags (always)
+  //   3. Active feature plan (if exists)
+  //   4. Project memory entries (trimmable)
+  //   5. Recent session summaries (trimmable)
   pi.on("before_agent_start", async (_event, ctx) => {
     const workspaceRoot = ctx.cwd;
-    const parts: string[] = [];
+    const prompt = (_event as any).prompt || "";
 
-    // Read TIDE.md for project-specific instructions
+    // During orchestration, only inject TIDE.md rules (safety-critical).
+    // Skip heavy context (tags, plans, memory, sessions) — the orchestrator
+    // already provides curated context in each step prompt.
+    if (prompt.trimStart().startsWith("[tide:orchestrated]")) {
+      const tideMdPath = path.join(workspaceRoot, "TIDE.md");
+      if (fs.existsSync(tideMdPath)) {
+        try {
+          const content = fs.readFileSync(tideMdPath, "utf-8");
+          const safeContent = stripSafetyPolicy(content);
+          return {
+            systemPrompt: (_event as any).systemPrompt +
+              "\n\n" + TOOL_USE_DIRECTIVE +
+              (safeContent ? "\n\n# Project Configuration (TIDE.md)\n\n" + safeContent : ""),
+          };
+        } catch { /* ignore */ }
+      }
+      return {
+        systemPrompt: (_event as any).systemPrompt + "\n\n" + TOOL_USE_DIRECTIVE,
+      };
+    }
+
+    const contextBudget = 8000; // max tokens for injected context
+    const parts: string[] = [];
+    let usedTokens = 0;
+
+    // 0. Tool usage directive — always inject first
+    parts.push(TOOL_USE_DIRECTIVE);
+    usedTokens += estimateTokens(TOOL_USE_DIRECTIVE);
+
+    // 1. TIDE.md — inject non-safety content (safety is enforced by tide-safety.ts)
     const tideMdPath = path.join(workspaceRoot, "TIDE.md");
     if (fs.existsSync(tideMdPath)) {
       try {
         const content = fs.readFileSync(tideMdPath, "utf-8");
-        parts.push(`# Project Configuration (TIDE.md)\n\n${content}`);
+        const safeContent = stripSafetyPolicy(content);
+        if (safeContent) {
+          const section = `# Project Configuration (TIDE.md)\n\n${safeContent}`;
+          parts.push(section);
+          usedTokens += estimateTokens(section);
+        }
       } catch { /* ignore */ }
     }
 
-    // Inject pinned region tags as context
+    // 2. Pinned region tags — always inject
     const tags = loadTags(workspaceRoot);
     const pinnedTags = tags.filter((t) => t.pinned);
     if (pinnedTags.length > 0) {
-      parts.push(formatTagsForContext(pinnedTags, workspaceRoot));
+      const section = formatTagsForContext(pinnedTags, workspaceRoot);
+      parts.push(section);
+      usedTokens += estimateTokens(section);
+    }
+
+    // 3. Active feature plan (if exists)
+    const plansDir = path.join(workspaceRoot, ".tide", "plans");
+    if (fs.existsSync(plansDir)) {
+      try {
+        const planFiles = fs.readdirSync(plansDir)
+          .filter((f) => f.endsWith(".json"))
+          .sort()
+          .reverse();
+        for (const pf of planFiles) {
+          const plan = JSON.parse(fs.readFileSync(path.join(plansDir, pf), "utf-8"));
+          if (plan.status === "in_progress" || plan.steps?.some((s: any) => s.status === "pending")) {
+            const section = `## Active Plan: ${plan.title}\n\n${plan.description}\n\nSteps: ${plan.steps?.map((s: any) => `${s.status === "completed" ? "[x]" : "[ ]"} ${s.title}`).join(", ")}`;
+            const tokens = estimateTokens(section);
+            if (usedTokens + tokens < contextBudget) {
+              parts.push(section);
+              usedTokens += tokens;
+            }
+            break;
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    // 4. Project memory — trimmable
+    const memory = loadMemory(workspaceRoot);
+    if (memory.length > 0) {
+      const section = formatMemoryForContext(memory);
+      const tokens = estimateTokens(section);
+      if (usedTokens + tokens < contextBudget) {
+        parts.push(section);
+        usedTokens += tokens;
+      }
+    }
+
+    // 5. Recent session summaries — trimmable
+    const recentSessions = loadRecentSessions(workspaceRoot, 2);
+    if (recentSessions.length > 0) {
+      const combined = recentSessions.join("\n\n---\n\n");
+      const section = `## Recent Sessions\n\n${combined}`;
+      const tokens = estimateTokens(section);
+      if (usedTokens + tokens < contextBudget) {
+        parts.push(section);
+        usedTokens += tokens;
+      }
     }
 
     if (parts.length > 0) {
@@ -108,7 +275,9 @@ export default function tideProject(pi: ExtensionAPI) {
   // Register custom tool for agent to query region tags
   pi.registerTool({
     name: "tide_tags",
+    label: "Region Tags",
     description: "List region tags for a file or the entire workspace. Region tags are user-annotated code regions.",
+    promptSnippet: "List user-annotated region tags for a file or workspace",
     parameters: Type.Object({
       filePath: Type.Optional(Type.String({ description: "Filter tags by file path" })),
     }),
@@ -134,7 +303,9 @@ export default function tideProject(pi: ExtensionAPI) {
   // Register tool for agent to create a region tag
   pi.registerTool({
     name: "tide_tag_create",
+    label: "Create Tag",
     description: "Create a new region tag to annotate a code region. Tags help track important code sections.",
+    promptSnippet: "Create a region tag to annotate a code section",
     parameters: Type.Object({
       filePath: Type.String({ description: "File path relative to workspace root" }),
       startLine: Type.Number({ description: "Start line number (1-based)" }),
@@ -168,7 +339,9 @@ export default function tideProject(pi: ExtensionAPI) {
   // Register tool for agent to delete a region tag
   pi.registerTool({
     name: "tide_tag_delete",
+    label: "Delete Tag",
     description: "Delete a region tag by its ID.",
+    promptSnippet: "Delete a region tag by ID",
     parameters: Type.Object({
       id: Type.String({ description: "Tag ID to delete" }),
     }),
@@ -188,6 +361,91 @@ export default function tideProject(pi: ExtensionAPI) {
         content: [{ type: "text" as const, text: `Deleted tag "${removed.label}" (${removed.id})` }],
         details: { deleted: removed },
       };
+    },
+  });
+
+  // ── Project Memory Tools ────────────────────────────────────
+
+  pi.registerTool({
+    name: "tide_memory_read",
+    label: "Read Memory",
+    description: "Read a project memory entry by key, or list all entries if no key provided. Use this to recall learned facts about the project.",
+    promptSnippet: "Read project memory entries (learned facts)",
+    parameters: Type.Object({
+      key: Type.Optional(Type.String({ description: "Key to read. Omit to list all." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const entries = loadMemory(ctx.cwd);
+      if (params.key) {
+        const entry = entries.find((e) => e.key === params.key);
+        if (!entry) {
+          return { content: [{ type: "text" as const, text: `No memory entry for key: ${params.key}` }] };
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }] };
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(entries, null, 2) }],
+        details: { count: entries.length },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "tide_memory_write",
+    label: "Write Memory",
+    description: "Store a project fact in memory. Use this to remember architecture decisions, naming conventions, test patterns, and other project knowledge for future sessions.",
+    promptSnippet: "Store a project fact in persistent memory",
+    promptGuidelines: [
+      "Use short, descriptive keys like 'test_framework' or 'api_pattern'",
+      "Store facts that would be useful across sessions — conventions, architecture decisions, gotchas",
+    ],
+    parameters: Type.Object({
+      key: Type.String({ description: "Short key for the fact (e.g. 'test_framework', 'api_pattern')" }),
+      value: Type.String({ description: "The fact to remember" }),
+      category: Type.Optional(Type.String({ description: "Category: architecture, convention, pattern, dependency, or other" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const entries = loadMemory(ctx.cwd);
+      const existing = entries.findIndex((e) => e.key === params.key);
+      const entry: MemoryEntry = {
+        key: params.key,
+        value: params.value,
+        category: params.category,
+        updatedAt: new Date().toISOString(),
+      };
+      if (existing !== -1) {
+        entries[existing] = entry;
+      } else {
+        entries.push(entry);
+      }
+      saveMemory(ctx.cwd, entries);
+      return {
+        content: [{ type: "text" as const, text: `Stored memory: ${params.key}` }],
+        details: { entry },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "tide_memory_delete",
+    label: "Delete Memory",
+    description: "Delete a project memory entry by key.",
+    promptSnippet: "Delete a project memory entry",
+    parameters: Type.Object({
+      key: Type.String({ description: "Key to delete" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const entries = loadMemory(ctx.cwd);
+      const idx = entries.findIndex((e) => e.key === params.key);
+      if (idx === -1) {
+        return {
+          content: [{ type: "text" as const, text: `No memory entry for key: ${params.key}` }],
+          isError: true,
+        };
+      }
+      entries.splice(idx, 1);
+      saveMemory(ctx.cwd, entries);
+      return { content: [{ type: "text" as const, text: `Deleted memory: ${params.key}` }] };
     },
   });
 }

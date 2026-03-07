@@ -50,10 +50,44 @@ interface RouterState {
 
 let currentRouterState: RouterState | null = null;
 
+function routerStatePath(cwd: string): string {
+  return path.join(cwd, ".tide", "router-state.json");
+}
+
+function persistRouterState(cwd: string, state: RouterState): void {
+  try {
+    const dir = path.join(cwd, ".tide");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(routerStatePath(cwd), JSON.stringify(state), "utf-8");
+  } catch (err) {
+    log(`Failed to persist router state: ${err}`);
+  }
+}
+
+function loadPersistedRouterState(cwd: string): RouterState | null {
+  try {
+    const p = routerStatePath(cwd);
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, "utf-8"));
+    }
+  } catch { /* ignore corrupt state */ }
+  return null;
+}
+
 // ── Extension ───────────────────────────────────────────────
 
 export default function tideRouter(pi: ExtensionAPI) {
   log("Extension registered (first-message routing + classification)");
+
+  // Restore persisted state on session start (survives Pi restarts)
+  pi.on("session_start", async (_event, ctx) => {
+    if (!currentRouterState) {
+      currentRouterState = loadPersistedRouterState(ctx.cwd);
+      if (currentRouterState) {
+        log(`Restored persisted router state: ${currentRouterState.tier} → ${currentRouterState.routedModel.provider}/${currentRouterState.routedModel.id}`);
+      }
+    }
+  });
 
   pi.on("before_agent_start", async (event, ctx) => {
     const config = loadRouterConfig(ctx.cwd);
@@ -70,7 +104,7 @@ export default function tideRouter(pi: ExtensionAPI) {
 
     // Skip routing for orchestrated prompts — the orchestrator manages model selection.
     // The [tide:orchestrated] marker is prepended by the Rust orchestrator.
-    if (prompt.startsWith("[tide:orchestrated]")) {
+    if (prompt.trimStart().startsWith("[tide:orchestrated]")) {
       log("Orchestrated prompt detected, skipping routing");
       return;
     }
@@ -150,6 +184,7 @@ export default function tideRouter(pi: ExtensionAPI) {
     if (current && current.provider === target.provider && current.id === target.id) {
       log(`Already on ${target.provider}/${target.id}, skipping switch`);
       currentRouterState = { sessionId, routedModel: { provider: target.provider, id: target.id }, tier };
+      persistRouterState(ctx.cwd, currentRouterState);
       return;
     }
 
@@ -160,6 +195,7 @@ export default function tideRouter(pi: ExtensionAPI) {
     if (success) {
       log(`✓ Switched to ${target.provider}/${target.id} for ${tier} tier`);
       currentRouterState = { sessionId, routedModel: { provider: target.provider, id: target.id }, tier };
+      persistRouterState(ctx.cwd, currentRouterState);
     } else {
       // Fallback chain: try other tiers' models
       log(`✗ Failed to switch to ${target.provider}/${target.id}, trying fallback chain...`);
@@ -173,6 +209,7 @@ export default function tideRouter(pi: ExtensionAPI) {
         if (await trySetModel(pi, fallback)) {
           log(`✓ Fallback succeeded: ${fallback.provider}/${fallback.id}`);
           currentRouterState = { sessionId, routedModel: { provider: fallback.provider, id: fallback.id }, tier };
+          persistRouterState(ctx.cwd, currentRouterState);
           fallbackSuccess = true;
           break;
         }
@@ -182,6 +219,7 @@ export default function tideRouter(pi: ExtensionAPI) {
         log(`✗ All fallbacks failed, staying on current model`);
         if (current) {
           currentRouterState = { sessionId, routedModel: { provider: current.provider, id: current.id }, tier };
+          persistRouterState(ctx.cwd, currentRouterState);
         }
       }
     }

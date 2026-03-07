@@ -23,6 +23,11 @@ export async function orchestrate(prompt: string): Promise<void> {
   await invoke("orchestrate", { prompt });
 }
 
+/** Cancel a running orchestration pipeline. */
+export async function cancelOrchestration(): Promise<void> {
+  await invoke("cancel_orchestration");
+}
+
 /** Steer: redirect the agent mid-run with new instructions (after current tool finishes). */
 export async function steerAgent(message: string): Promise<void> {
   await invoke("steer_agent", { message });
@@ -157,8 +162,15 @@ export async function readRouterConfig(): Promise<{ enabled: boolean; autoSwitch
 }
 
 /** Write router config to .tide/router-config.json. */
-export async function writeRouterConfig(autoSwitch: boolean): Promise<void> {
-  await invoke("write_router_config", { enabled: true, autoSwitch });
+export async function writeRouterConfig(
+  autoSwitch: boolean,
+  tierModels?: Record<string, { provider: string; id: string } | undefined>,
+): Promise<void> {
+  await invoke("write_router_config", {
+    enabled: true,
+    autoSwitch,
+    tierModels: tierModels ?? null,
+  });
 }
 
 // ── Pi Agent: Context Management ───────────────────────────
@@ -224,7 +236,52 @@ export async function listSkills(): Promise<SkillInfo[]> {
   return invoke<SkillInfo[]>("list_skills");
 }
 
+/** Install or remove a Pi skill/package. Action: "install" | "remove". */
+export async function manageSkill(action: "install" | "remove", source: string): Promise<string> {
+  return invoke<string>("manage_skill", { action, source });
+}
+
 // ── Native FS Commands ─────────────────────────────────────
+
+/** Get workspace path passed via CLI args (e.g. `tide /path/to/project`). */
+export async function getLaunchPath(): Promise<string | null> {
+  return invoke<string | null>("get_launch_path");
+}
+
+/** Install the `tide` CLI command to /usr/local/bin. */
+export async function installCli(): Promise<string> {
+  return invoke<string>("install_cli");
+}
+
+// ── OAuth / Subscriptions ────────────────────────────────────
+
+export interface OAuthProviderStatus {
+  provider: string;
+  authType: "oauth" | "api_key";
+  hasCredentials: boolean;
+}
+
+/** List OAuth providers with credential status from ~/.pi/agent/auth.json */
+export async function oauthListProviders(): Promise<OAuthProviderStatus[]> {
+  return invoke<OAuthProviderStatus[]>("oauth_list_providers");
+}
+
+/** Remove OAuth credentials for a provider. */
+export async function oauthLogout(provider: string): Promise<string> {
+  return invoke<string>("oauth_logout", { provider });
+}
+
+export interface VersionInfo {
+  tide: string;
+  pi: string;
+}
+
+/** Get Tide and Pi version info. */
+export async function getVersionInfo(): Promise<VersionInfo> {
+  return invoke<VersionInfo>("get_version_info");
+}
+
+// ── Workspace ────────────────────────────────────────────────
 
 /** Open a workspace directory. Returns file listing. */
 export async function openWorkspace(path: string): Promise<FsEntry[]> {
@@ -317,6 +374,11 @@ export async function fsReplaceAll(params: {
 /** Create a new file. */
 export async function fsCreateFile(path: string, content?: string): Promise<void> {
   await invoke("fs_create_file", { path, content: content ?? null });
+}
+
+/** Write content to an existing file. */
+export async function fsWriteFile(path: string, content: string): Promise<void> {
+  await invoke("fs_write_file", { path, content });
 }
 
 /** Create a new directory (recursive). */

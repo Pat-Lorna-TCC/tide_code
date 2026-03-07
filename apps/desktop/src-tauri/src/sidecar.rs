@@ -110,7 +110,7 @@ fn target_triple() -> &'static str {
     { "aarch64-unknown-linux-gnu" }
 }
 
-fn resolve_pi_path() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub fn resolve_pi_path() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // 1. Check env var override
     if let Ok(p) = std::env::var("TIDE_PI_PATH") {
         if PathBuf::from(&p).exists() {

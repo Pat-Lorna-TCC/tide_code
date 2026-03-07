@@ -2,19 +2,25 @@
 
 An AI-native code editor with orchestrated multi-step workflows, built on [Tauri v2](https://v2.tauri.app) and the [Pi coding agent](https://shittycodingagent.ai).
 
-Tide wraps Pi as a sidecar process, adding a full IDE around it: Monaco editor, file tree, integrated terminal, codebase indexing, and an orchestration engine that breaks complex tasks into plan-build-review pipelines.
+Tide wraps Pi as a sidecar process, adding a full IDE around it: Monaco editor, file tree, integrated terminal, codebase indexing, project memory, and an orchestration engine that breaks complex tasks into plan-build-review pipelines.
 
 ## What Makes Tide Different
 
 **Glass-box context** -- See exactly what the agent sees: token budget, context usage, injected files, and cost breakdown in real time.
 
-**Orchestrated workflows** -- Complex tasks are automatically routed through a multi-phase pipeline: classify complexity -> select the right model -> generate a plan -> execute steps -> review and iterate. Simple questions just get answered directly.
+**Orchestrated workflows** -- Complex tasks are automatically routed through a multi-phase pipeline: classify complexity -> select the right model -> generate a plan -> execute steps -> review and iterate. Simple questions just get answered directly. Cancel any pipeline mid-run.
 
-**Built-in codebase index** -- Tree-sitter parses your entire project into a SQLite+FTS5 symbol database (`.tide/index.db`). The AI agent can search for functions, classes, and types across the codebase instantly -- no LSP server required. This is the same approach as [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp), but built natively into the editor.
+**Built-in codebase index** -- Tree-sitter parses your entire project into a SQLite+FTS5 symbol database (`.tide/index.db`). The AI agent can search for functions, classes, and types across the codebase instantly -- no LSP server required.
 
-**Cost-aware model routing** -- Simple edits use fast, cheap models. Multi-file architecture tasks get routed to powerful models. The router classifies every prompt and picks the best model for the job, with automatic fallback if a provider key is missing.
+**Project memory** -- Tide remembers across sessions. The agent stores learned facts about your project (architecture decisions, conventions, patterns) in `.tide/memory.json`. Session summaries are saved to `.tide/sessions/` and automatically injected as context in future conversations.
 
-**Configurable everything** -- Review mode, QA commands, clarify timeouts, model lock during orchestration -- all configurable per-project via `.tide/orchestrator-config.json` or the Settings panel.
+**Smart context injection** -- Priority-based injection with token budgeting: TIDE.md rules (always) -> pinned region tags -> active feature plan -> project memory -> recent session summaries. Trimmable items are dropped when the budget is tight.
+
+**Cost-aware model routing** -- Simple edits use fast, cheap models. Multi-file architecture tasks get routed to powerful models. The router classifies every prompt and picks the best model for the job.
+
+**Editable editor** -- Full read-write Monaco editor with Cmd+S save, dirty state tracking, and Tokyo Night theme. Not just a viewer.
+
+**Configurable everything** -- Review mode, QA commands, clarify timeouts, model lock during orchestration, tier model preferences -- all configurable per-project via `.tide/orchestrator-config.json` and `.tide/router-config.json`.
 
 ## How It Works
 
@@ -33,15 +39,16 @@ Tide wraps Pi as a sidecar process, adding a full IDE around it: Monaco editor, 
 +------------------+     | tide-index.ts       |
         |                 | tide-safety.ts      |
    Tauri Events           | tide-project.ts     |
-        |                 | tide-classify.ts    |
-        v                 | tide-web-search.ts  |
-+------------------+      +--------------------+
-|   React UI       |
+        |                 | tide-session.ts     |
+        v                 | tide-classify.ts    |
++------------------+      | tide-web-search.ts  |
+|   React UI       |      +--------------------+
 |  - Monaco Editor |
 |  - Agent Chat    |
 |  - File Tree     |
 |  - Terminal      |
 |  - Settings      |
+|  - Dashboard     |
 +------------------+
 ```
 
@@ -50,17 +57,17 @@ Tide wraps Pi as a sidecar process, adding a full IDE around it: Monaco editor, 
 Tide runs Pi as a sidecar process in RPC mode. On startup:
 
 1. **Sidecar resolution** -- Rust finds the Pi binary: checks `binaries/pi-sidecar-{target-triple}` (production bundle), then `node_modules` (dev), then PATH
-2. **API key injection** -- Reads keys from macOS Keychain, injects as environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`)
-3. **Extension loading** -- Passes 7 custom extensions via `-e` flags
+2. **API key injection** -- Reads keys from macOS Keychain, injects as environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TAVILY_API_KEY`). Pi also supports OAuth2 login for subscription providers (ChatGPT Plus/Pro Codex, Claude Pro/Max, GitHub Copilot, Gemini CLI) with credentials cached in `~/.pi/agent/auth.json`.
+3. **Extension loading** -- Passes 8 custom extensions via `-e` flags
 4. **JSON-RPC bridge** -- Rust reads Pi's stdout line-by-line, parses events, and emits them as Tauri events to the React frontend
 
 Pi retains full ownership of: LLM interaction, tool execution (read/write/edit/bash/grep), session management (JSONL tree structure, auto-compaction), and the agent loop.
 
-Tide adds on top: orchestration (multi-step pipelines), the codebase index, native git/terminal, and the full IDE UI.
+Tide adds on top: orchestration (multi-step pipelines), the codebase index, project memory, session intelligence, native git/terminal, and the full IDE UI.
 
 ### Codebase Indexing
 
-Tide includes a built-in codebase indexer that works like [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp):
+Tide includes a built-in codebase indexer:
 
 - **Tree-sitter parsing** for TypeScript, JavaScript, Rust, Python, and Go
 - **Symbol extraction**: functions, classes, interfaces, types, methods with line ranges
@@ -75,12 +82,21 @@ The agent can search your entire codebase by symbol name, find all symbols in a 
 When you send a complex prompt (detected automatically or forced with Cmd+Enter):
 
 1. **Routing** -- `tide-classify.ts` analyzes complexity, `tide-router.ts` selects the appropriate model tier
-2. **Planning** -- Pi generates a structured plan with steps, files, and acceptance criteria. Optionally asks clarifying questions.
-3. **Building** -- Each step executes sequentially in its own session. Prompts are prefixed with `[tide:orchestrated]` to prevent re-routing.
-4. **Reviewing** -- An iterative QA loop checks the output. If configured, runs test commands. May generate findings that trigger additional build steps.
-5. **Completion** -- Frontend displays the final status. A heartbeat monitors for stalls (warning after 30s of silence).
+2. **Planning** -- Pi generates a structured plan with steps, files, and acceptance criteria. Optionally asks clarifying questions. Writes a research cache to `.tide/research.md`.
+3. **Building** -- Each step executes sequentially with context compaction between steps. Dependency-aware execution via topological sort. Prompts are prefixed with `[tide:orchestrated]` to prevent re-routing.
+4. **Reviewing** -- An iterative QA loop checks the output. If configured, runs test commands. May generate findings that trigger additional fix steps (capped at configurable max iterations).
+5. **Completion** -- Frontend displays the final status. A heartbeat monitors for stalls (warning after 30s of silence). Cancel button available at any phase.
 
 All orchestration settings are configurable per-project in `.tide/orchestrator-config.json`.
+
+### Session Intelligence
+
+Tide remembers what happened across sessions:
+
+- **Session summaries** -- The agent can call `tide_session_summary` to save a structured summary (files changed, decisions, TODOs) to `.tide/sessions/<timestamp>.md`
+- **Project memory** -- Key-value store at `.tide/memory.json` for persistent project facts. Tools: `tide_memory_read`, `tide_memory_write`, `tide_memory_delete`
+- **Smart context injection** -- On every agent start, Tide injects prioritized context: TIDE.md rules, pinned tags, active plans, memory entries, and recent session summaries -- all within a token budget
+- **Session history UI** -- Browse past sessions in the History tab, expand summaries, and continue from any previous session
 
 ## Project Structure
 
@@ -88,11 +104,11 @@ All orchestration settings are configurable per-project in `.tide/orchestrator-c
 tide_code/
   packages/shared/          # Shared types (Zod schemas)
   apps/desktop/
-    pi-extensions/          # 7 Pi extensions (routing, planning, indexing, etc.)
-    src/                    # React frontend (15+ Zustand stores, 30+ components)
-    src-tauri/src/          # Rust backend (orchestrator, sidecar, git, pty, index)
+    pi-extensions/          # 8 Pi extensions (routing, planning, indexing, memory, etc.)
+    src/                    # React frontend (17 Zustand stores, 30+ components)
+    src-tauri/src/          # Rust backend (orchestrator, sidecar, git, pty, indexer)
   scripts/                  # Build, release, sidecar prep scripts
-  .tide/                    # Per-project data (index.db, config, research cache)
+  .tide/                    # Per-project data (index.db, config, memory, sessions, plans)
 ```
 
 See [PROJECT.md](./PROJECT.md) for the complete file-by-file structure.
@@ -100,7 +116,6 @@ See [PROJECT.md](./PROJECT.md) for the complete file-by-file structure.
 ## Quick Links
 
 - [QUICKSTART.md](./QUICKSTART.md) -- Development setup and running locally
-- [DEPLOY.md](./DEPLOY.md) -- Production build, signing, notarization, and release
 - [PROJECT.md](./PROJECT.md) -- Detailed architecture, data flows, and design decisions
 
 ## Requirements
@@ -109,8 +124,8 @@ See [PROJECT.md](./PROJECT.md) for the complete file-by-file structure.
 - **pnpm** (package manager)
 - **Rust** (stable toolchain, installed via rustup)
 - **macOS** 12+ (primary platform; Linux support planned)
-- At least one LLM API key (Anthropic, OpenAI, or Google)
+- At least one LLM API key (Anthropic, OpenAI, or Google) or an OAuth-supported subscription (ChatGPT Plus/Pro, GitHub Copilot, etc.)
 
 ## License
 
-Private / Proprietary
+[MIT](./LICENSE)

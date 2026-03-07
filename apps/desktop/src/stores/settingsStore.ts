@@ -10,7 +10,7 @@ import { useWorkspaceStore } from "./workspace";
 
 export const SETTINGS_TAB_PATH = "__settings__";
 
-export type SettingsSection = "providers" | "routing" | "orchestration" | "safety" | "skills" | "shortcuts";
+export type SettingsSection = "general" | "providers" | "routing" | "orchestration" | "safety" | "skills" | "shortcuts";
 
 export interface TierModelConfig {
   provider: string;
@@ -45,15 +45,18 @@ interface SettingsState {
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
-  activeSection: "providers",
+  activeSection: "general",
   autoMode: true,
   tierModels: {},
   orchestratorConfig: { ...DEFAULT_ORC_CONFIG },
 
   load: async () => {
     try {
-      const config = await readRouterConfig();
+      const config = await readRouterConfig() as any;
       set({ autoMode: config.autoSwitch });
+      if (config.tierModels) {
+        set({ tierModels: config.tierModels });
+      }
     } catch {
       // keep defaults
     }
@@ -92,7 +95,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       delete tierModels[tier];
     }
     set({ tierModels });
-    // TODO: persist tierModels to router-config.json when backend supports it
+    writeRouterConfig(get().autoMode, tierModels).catch((e) =>
+      console.error("Failed to persist tier models:", e),
+    );
   },
   updateOrchestratorConfig: (partial) => {
     const merged = { ...get().orchestratorConfig, ...partial };

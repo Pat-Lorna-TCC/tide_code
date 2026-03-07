@@ -14,3 +14,11 @@ apps/desktop/src-tauri/resources/**
 !apps/desktop/src-tauri/resources/**/.gitkeep
 apps/desktop/src-tauri/binaries/
 build.log
+
+# Project-local data
+.tide/
+_archive_engine/
+
+# Private release scripts
+scripts/
+apps/desktop/scripts/

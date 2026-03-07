@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { fsListDir } from "../lib/ipc";
+import { fsListDir, fsWriteFile } from "../lib/ipc";
+import { showError, showSuccess } from "./toastStore";
 
 export interface FsEntry {
   name: string;
@@ -32,6 +33,7 @@ interface WorkspaceState {
   closeTab: (path: string) => void;
   setActiveTab: (path: string | null) => void;
   updateTabContent: (path: string, content: string) => void;
+  saveActiveFile: () => Promise<void>;
   refreshFileTree: () => void;
 }
 
@@ -105,6 +107,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         t.path === path ? { ...t, content, isDirty: true } : t,
       ),
     })),
+
+  saveActiveFile: async () => {
+    const { activeTabPath, openTabs } = get();
+    if (!activeTabPath) return;
+    const tab = openTabs.find((t) => t.path === activeTabPath);
+    if (!tab || !tab.isDirty) return;
+    try {
+      await fsWriteFile(tab.path, tab.content);
+      set((state) => ({
+        openTabs: state.openTabs.map((t) =>
+          t.path === tab.path ? { ...t, isDirty: false } : t,
+        ),
+      }));
+      showSuccess(`Saved ${tab.name}`);
+    } catch (err) {
+      showError(`Save failed: ${err}`);
+    }
+  },
 
   refreshFileTree: () => {
     const { rootPath, expandedDirs } = get();

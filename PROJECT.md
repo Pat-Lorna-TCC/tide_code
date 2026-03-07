@@ -1,6 +1,6 @@
 # Tide IDE -- Project Structure & Architecture
 
-Spec v3.0 | 2026-03-06
+Spec v3.1 | 2026-03-07
 
 ## 1) Vision
 
@@ -33,7 +33,7 @@ Tide is a desktop IDE that makes AI coding agents **transparent, controllable, a
 | Technology | Purpose |
 |---|---|
 | React 19 | UI framework |
-| Zustand 5 | State management (15+ stores) |
+| Zustand 5 | State management (17 stores) |
 | Monaco Editor | Code editing (VS Code engine) |
 | xterm.js | Integrated terminal emulator |
 | react-markdown | Markdown rendering in chat |
@@ -59,9 +59,10 @@ Tide is a desktop IDE that makes AI coding agents **transparent, controllable, a
 | Technology | Purpose |
 |---|---|
 | Pi coding agent (`@mariozechner/pi-coding-agent`) | LLM-powered coding agent with tool use, sessions, extensions |
-| Pi extensions (7 custom) | TypeScript plugins for routing, planning, indexing, safety, web search |
+| Pi extensions (8 custom) | TypeScript plugins for routing, planning, indexing, safety, sessions, web search |
 | macOS Keychain | Secure API key storage (Anthropic, OpenAI, Google, Tavily) |
-| Supported LLM providers | Anthropic (Claude), OpenAI (GPT/o-series), Google (Gemini), and 12+ others via Pi |
+| OAuth2 subscription auth | Pi handles OAuth PKCE login for ChatGPT Plus/Pro (Codex), Claude Pro/Max, GitHub Copilot, Gemini CLI |
+| Supported LLM providers | Anthropic (Claude), OpenAI (GPT/o-series/Codex), Google (Gemini), GitHub Copilot, and 12+ others via Pi |
 
 ---
 
@@ -93,6 +94,7 @@ tide_code/
         tide-index.ts         #   Codebase index query tools for Pi
         tide-project.ts       #   Project context injection
         tide-safety.ts        #   Safety guardrails for destructive operations
+        tide-session.ts       #   Session summaries + project memory tools
         tide-web-search.ts    #   Web search tool (Tavily API)
 
       src/                    # Frontend React application
@@ -123,6 +125,7 @@ tide_code/
           commandStore.ts     #     Command palette actions
           regionTagStore.ts   #     Code region tags
           permissionStore.ts  #     Permission management
+          toastStore.ts       #     Toast notifications
           ui.ts               #     UI layout state
           engine.ts           #     Core engine initialization
 
@@ -140,6 +143,8 @@ tide_code/
           Approval/           #     Tool execution approval dialog
           DiffPreview/        #     Side-by-side diff viewer
           ContextInspector/   #     Context window inspector
+          Dashboard/          #     Dashboard UI
+          Toasts/             #     Toast notifications
 
       src-tauri/              # Rust backend
         tauri.conf.json       #   Tauri configuration
@@ -156,6 +161,13 @@ tide_code/
           git.rs              #   Git operations via libgit2
           pty.rs              #   Terminal PTY management
           keychain.rs         #   macOS Keychain access
+          indexer/             #   Tree-sitter codebase indexer (6 modules)
+            mod.rs            #     Module root + index_workspace()
+            schema.rs         #     SQLite schema + FTS5 table setup
+            parser.rs         #     Tree-sitter AST parsing
+            watcher.rs        #     Filesystem watcher for incremental re-index
+            query.rs          #     FTS5 search queries
+            symbols.rs        #     Symbol extraction from parse trees
 
         binaries/             #   Sidecar wrappers (gitignored, generated)
         resources/            #   Bundled resources (gitignored, generated at build)
@@ -167,7 +179,11 @@ tide_code/
     router-config.json        #   Router model preferences
     orchestrator-config.json  #   Orchestration settings
     research.md               #   Cached research from planning phase
+    memory.json               #   Project memory key-value store
+    permissions.json          #   Permission overrides
     phases/                   #   Development phase tracking
+    plans/                    #   Plan JSON files from orchestration
+    sessions/                 #   Session summary markdown files
     tags/                     #   Region tags
 ```
 
@@ -244,8 +260,9 @@ App startup or file change detected
 
 This is functionally equivalent to [jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp) but built natively into Tide -- no external MCP server needed. The index lives at `.tide/index.db` and is queried by Pi extensions in-process.
 
-### 5.4 API Key Flow
+### 5.4 Authentication Flow
 
+**API Keys (manual):**
 ```
 User enters API key in Settings > Providers
   -> keychain.ts setKey() -> Tauri command -> macOS Keychain
@@ -253,6 +270,20 @@ User enters API key in Settings > Providers
   -> Keys injected as env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, TAVILY_API_KEY
   -> Pi reads env vars for LLM authentication
   -> Router selects from available providers based on configured keys
+```
+
+**OAuth2 subscriptions (managed by Pi):**
+```
+Pi supports OAuth2 PKCE login for subscription-based providers:
+  - OpenAI ChatGPT Plus/Pro (Codex): gpt-5-codex, gpt-5.3-codex, codex-mini
+  - Anthropic Claude Pro/Max
+  - GitHub Copilot
+  - Google Gemini CLI / Antigravity
+
+Flow: Pi opens browser for OAuth login -> PKCE code exchange -> tokens stored
+  -> Credentials cached in ~/.pi/agent/auth.json with auto-refresh
+  -> Pi manages token lifecycle (refresh before expiry, 5-min buffer)
+  -> Also supports device code flow for headless environments
 ```
 
 ---
@@ -269,6 +300,7 @@ Extensions are TypeScript files in `apps/desktop/pi-extensions/` loaded by Pi at
 | `tide-index.ts` | tools | Codebase search tools backed by `.tide/index.db` (FTS5 queries) |
 | `tide-project.ts` | `before_agent_start` | Injects project context (README, conventions, structure) |
 | `tide-safety.ts` | `tool_call` | Safety guardrails: approval gates for destructive operations |
+| `tide-session.ts` | tools | Session summaries (`tide_session_summary`) + project memory (`tide_memory_read/write/delete`) |
 | `tide-web-search.ts` | tools | Web search via Tavily API for documentation/reference lookup |
 
 ### Extension API (Pi provides)
@@ -342,7 +374,7 @@ Stored in `.tide/orchestrator-config.json`, editable via Settings > Orchestratio
 
 2. **Extensions over hardcoding**: Routing, planning, indexing, and safety are Pi extensions (TypeScript), not Rust code. Easy to modify without recompiling.
 
-3. **Keychain for secrets**: API keys in macOS Keychain, never on disk. Injected as env vars when Pi starts.
+3. **Keychain for secrets + OAuth via Pi**: API keys stored in macOS Keychain, injected as env vars when Pi starts. Subscription providers (Codex, Copilot, Claude Pro/Max) authenticate via Pi's built-in OAuth2 PKCE flow with tokens cached in `~/.pi/agent/auth.json`.
 
 4. **Tree-sitter for indexing**: Native-speed AST parsing provides symbol-level codebase understanding without requiring LSP servers. Same approach as jcodemunch-mcp but built-in.
 
@@ -365,8 +397,8 @@ Stored in `.tide/orchestrator-config.json`, editable via Settings > Orchestratio
 | 6b | Done | Terminal integration (xterm.js + native PTY) |
 | 7 | Done | Router + classifier + planner + plan viewer + cost tracker |
 | 8 | Done | Orchestration engine + progress UI + review loop + heartbeat |
-| 9 | Partial | Skills discovery UI (queries Pi for installed skills) |
-| 10 | Planned | Session intelligence + project memory |
+| 9 | Done | Skills discovery UI (queries Pi for installed skills) |
+| 10 | Done | Session intelligence + project memory |
 
 ---
 

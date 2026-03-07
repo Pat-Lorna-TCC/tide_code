@@ -50,12 +50,12 @@ function loadSafetyConfig(workspaceRoot: string): SafetyConfig {
     const config = { ...DEFAULT_CONFIG };
 
     // Parse approval policy
-    const writePolicy = content.match(/write_approval:\s*(always|ask|never)/i);
+    const writePolicy = content.match(/(?:write_approval|write):\s*(always|ask|never)/i);
     if (writePolicy) {
       config.approvalPolicy.write = writePolicy[1].toLowerCase() as "always" | "ask" | "never";
     }
 
-    const cmdPolicy = content.match(/command_approval:\s*(disabled|always|allowlist)/i);
+    const cmdPolicy = content.match(/(?:command_approval|command_policy|command):\s*(disabled|always|allowlist)/i);
     if (cmdPolicy) {
       config.approvalPolicy.command = cmdPolicy[1].toLowerCase() as "disabled" | "always" | "allowlist";
     }
@@ -149,30 +149,41 @@ function formatToolCallDescription(
 
 export default function tideSafety(pi: ExtensionAPI) {
   let safetyConfig: SafetyConfig = DEFAULT_CONFIG;
+  let isOrchestrated = false;
 
   pi.on("session_start", async (_event, ctx) => {
     safetyConfig = loadSafetyConfig(ctx.cwd);
+    isOrchestrated = false;
   });
 
-  // Fix: Strip OpenAI reasoning signatures from assistant messages before sending to LLM.
+  // Track orchestration state to auto-approve tool calls during orchestrated steps
+  pi.on("before_agent_start", async (event) => {
+    isOrchestrated = (event.prompt || "").trimStart().startsWith("[tide:orchestrated]");
+  });
+
+  // Workaround: Strip OpenAI reasoning signatures from assistant messages before sending to LLM.
   // OpenAI's Responses API returns thinkingSignature IDs that reference server-side state.
   // When store=false, these IDs become invalid on subsequent turns, causing 404 errors.
   // This context hook removes them so the conversation can continue without errors.
-  pi.on("context", async (event) => {
+  // TODO: Remove this workaround when Pi handles thinkingSignature stripping natively.
+  // Tested against: Pi 0.57.0, OpenAI Responses API (o3/o4-mini reasoning models).
+  pi.on("context", async (event, ctx) => {
+    // Only OpenAI models produce thinkingSignature — skip scan for other providers
+    if (!(ctx as any).model?.provider?.includes("openai")) return;
+
     const messages = event.messages;
-    let modified = false;
+    let strippedCount = 0;
     const cleaned = messages.map((msg: any) => {
       if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg;
       const hasThinkingSig = msg.content.some(
-        (part: any) => part.type === "thinking" && part.thinkingSignature,
+        (part: any) => part.type === "thinking" && typeof part.thinkingSignature === "string",
       );
       if (!hasThinkingSig) return msg;
-      modified = true;
       return {
         ...msg,
         content: msg.content.map((part: any) => {
-          if (part.type === "thinking" && part.thinkingSignature) {
-            // Keep thinking text (if any) but remove the signature ID
+          if (part.type === "thinking" && typeof part.thinkingSignature === "string") {
+            strippedCount++;
             const { thinkingSignature, ...rest } = part;
             return rest;
           }
@@ -180,13 +191,19 @@ export default function tideSafety(pi: ExtensionAPI) {
         }),
       };
     });
-    if (modified) {
-      process.stderr.write("[tide:safety] Stripped thinkingSignature from assistant messages\n");
+    if (strippedCount > 0) {
+      process.stderr.write(`[tide:safety] Stripped ${strippedCount} thinkingSignature(s) from assistant messages\n`);
       return { messages: cleaned };
     }
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    // Auto-approve all tool calls during orchestration — the orchestrator is the controller
+    if (isOrchestrated) {
+      process.stderr.write(`[tide:safety] Auto-approved: ${event.toolName}\n`);
+      return;
+    }
+
     const toolName = event.toolName;
     const args = (event.input ?? {}) as Record<string, unknown>;
     const level = classifyTool(toolName);
@@ -201,9 +218,10 @@ export default function tideSafety(pi: ExtensionAPI) {
     }
 
     const description = formatToolCallDescription(toolName, args, ctx.cwd);
+    const meta = JSON.stringify({ toolName, safetyLevel: level });
     const approved = await ctx.ui.confirm(
       `[${level.toUpperCase()}] Approve tool call?`,
-      description,
+      `${description}\n<!--TIDE_META:${meta}-->`,
     );
 
     if (!approved) {

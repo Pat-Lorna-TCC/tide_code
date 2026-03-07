@@ -125,6 +125,14 @@ impl Orchestrator {
         Self { workspace_root, config }
     }
 
+    fn check_cancelled(cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            Err("Orchestration cancelled".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Run the full orchestration pipeline: Route → Plan → Build → Review (loop) → Complete.
     ///
     /// Key design decisions:
@@ -138,13 +146,21 @@ impl Orchestrator {
         pi_handle: PiHandle,
         app_handle: tauri::AppHandle,
         agent_end_notify: Arc<Notify>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
+        // Enable auto-compaction so Pi manages context size automatically
+        let auto_compact_cmd = serde_json::json!({
+            "type": "set_auto_compaction",
+            "enabled": true
+        });
+        pi_handle.send(&auto_compact_cmd).await.ok();
+
         // ── Phase: Routing ──────────────────────────────────
-        // Routing is handled automatically by the tide-router Pi extension
-        // on the first prompt. We just emit the phase event.
+        Self::check_cancelled(&cancel)?;
         self.emit_phase(&app_handle, OrcPhase::Routing, None, 0, 0, "Classifying task...");
 
         // ── Phase: Planning ─────────────────────────────────
+        Self::check_cancelled(&cancel)?;
         self.emit_phase(&app_handle, OrcPhase::Planning, None, 0, 0, "Creating implementation plan...");
 
         let planning_prompt = self.build_planning_prompt(&prompt);
@@ -162,7 +178,8 @@ impl Orchestrator {
         // ── Phase: Building ─────────────────────────────────
         // Stay in the same session as planning — the agent already has codebase
         // context from exploration. Compact between steps to manage context size.
-        self.execute_build_steps(&prompt, &plan_id, total, &pi_handle, &app_handle, &agent_end_notify).await?;
+        Self::check_cancelled(&cancel)?;
+        self.execute_build_steps(&prompt, &plan_id, total, &pi_handle, &app_handle, &agent_end_notify, &cancel).await?;
 
         // ── Phase: Reviewing (iterative QA loop) ────────────
         // Review mode is configurable: "fresh_session" (default) or "compact".
@@ -170,6 +187,7 @@ impl Orchestrator {
         let max_iterations = self.config.max_review_iterations;
         let mut review_iteration = 0;
         loop {
+            Self::check_cancelled(&cancel)?;
             review_iteration += 1;
             let plan = self.load_plan_by_id(&plan_id)?;
             let current_total = plan.steps.len();
@@ -188,7 +206,7 @@ impl Orchestrator {
                 self.compact(&pi_handle).await;
             } else {
                 // Default: fresh session for clean perspective
-                self.new_session(&pi_handle, &agent_end_notify).await?;
+                self.new_session(&pi_handle).await?;
             }
 
             let review_prompt = self.build_review_prompt(&prompt, &plan);
@@ -216,11 +234,19 @@ impl Orchestrator {
             );
 
             // New session for fix steps
-            self.new_session(&pi_handle, &agent_end_notify).await?;
-            self.execute_pending_steps(&prompt, &plan_id, &pi_handle, &app_handle, &agent_end_notify).await?;
+            Self::check_cancelled(&cancel)?;
+            self.new_session(&pi_handle).await?;
+            self.execute_pending_steps(&prompt, &plan_id, &pi_handle, &app_handle, &agent_end_notify, &cancel).await?;
         }
 
         // ── Phase: Complete ─────────────────────────────────
+        // Restore auto-compaction to default (off)
+        let restore_cmd = serde_json::json!({
+            "type": "set_auto_compaction",
+            "enabled": false
+        });
+        pi_handle.send(&restore_cmd).await.ok();
+
         let final_plan = self.load_plan_by_id(&plan_id)?;
         self.emit_phase(
             &app_handle,
@@ -248,11 +274,12 @@ impl Orchestrator {
         pi_handle: &PiHandle,
         app_handle: &tauri::AppHandle,
         notify: &Arc<Notify>,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), String> {
         let execution_order = self.resolve_execution_order(plan_id)?;
-        let mut executed_count = 0;
 
         for i in execution_order {
+            Self::check_cancelled(cancel)?;
             let plan = self.load_plan_by_id(plan_id)?;
             let step = &plan.steps[i];
 
@@ -286,7 +313,6 @@ impl Orchestrator {
                 }
             }
 
-            executed_count += 1;
             self.emit_phase(
                 app_handle,
                 OrcPhase::Building,
@@ -295,12 +321,6 @@ impl Orchestrator {
                 total,
                 &format!("Step {}/{}: {}", i + 1, total, step.title),
             );
-
-            // Compact context before each step (except the first) to keep
-            // context window manageable while preserving key information.
-            if executed_count > 1 {
-                self.compact(pi_handle).await;
-            }
 
             let step_prompt = self.build_step_prompt(user_prompt, &plan, i);
 
@@ -398,6 +418,7 @@ impl Orchestrator {
         pi_handle: &PiHandle,
         app_handle: &tauri::AppHandle,
         notify: &Arc<Notify>,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), String> {
         let plan = self.load_plan_by_id(plan_id)?;
         let total = plan.steps.len();
@@ -408,6 +429,7 @@ impl Orchestrator {
             .collect();
 
         for (exec_num, &i) in pending_indices.iter().enumerate() {
+            Self::check_cancelled(cancel)?;
             let plan = self.load_plan_by_id(plan_id)?;
             let step = &plan.steps[i];
 
@@ -419,10 +441,6 @@ impl Orchestrator {
                 total,
                 &format!("Fix {}/{}: {}", exec_num + 1, pending_indices.len(), step.title),
             );
-
-            if exec_num > 0 {
-                self.compact(pi_handle).await;
-            }
 
             let step_prompt = self.build_step_prompt(user_prompt, &plan, i);
             match self.send_and_wait(pi_handle, &step_prompt, notify).await {
@@ -464,48 +482,95 @@ impl Orchestrator {
         prompt: &str,
         notify: &Arc<Notify>,
     ) -> Result<(), String> {
-        let cmd = serde_json::json!({
+        let mut cmd = serde_json::json!({
             "type": "prompt",
             "message": prompt,
         });
-        pi_handle
-            .send(&cmd)
+
+        // Send with request ID for response correlation
+        let response_rx = pi_handle
+            .send_with_id(&mut cmd)
             .await
             .map_err(|e| format!("Failed to send prompt: {}", e))?;
 
-        // Wait for the agent to finish processing
+        // Wait for the immediate response (confirms prompt was accepted)
+        let response = response_rx
+            .await
+            .map_err(|_| "Pi response channel dropped".to_string())?;
+
+        let success = response
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !success {
+            let error = response
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
+            return Err(format!("Prompt rejected: {}", error));
+        }
+
+        // Wait for agent to finish processing (agent_end event)
         notify.notified().await;
         Ok(())
     }
 
     /// Request Pi to compact the current session context.
-    /// Non-blocking: we fire the compact command and let Pi handle it.
+    /// Waits for Pi's response to ensure compaction completes before continuing.
     async fn compact(&self, pi_handle: &PiHandle) {
-        let cmd = serde_json::json!({ "type": "compact" });
-        if let Err(e) = pi_handle.send(&cmd).await {
-            tracing::warn!("Failed to send compact command: {}", e);
+        let mut cmd = serde_json::json!({ "type": "compact" });
+        match pi_handle.send_with_id(&mut cmd).await {
+            Ok(rx) => {
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(30),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(response)) => {
+                        tracing::debug!(
+                            "Compact completed: {}",
+                            response
+                                .get("success")
+                                .and_then(|v| v.as_bool())
+                                .map(|b| b.to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        );
+                    }
+                    Ok(Err(_)) => tracing::warn!("Compact response channel dropped"),
+                    Err(_) => tracing::warn!("Compact timed out after 30s"),
+                }
+            }
+            Err(e) => tracing::warn!("Failed to send compact command: {}", e),
         }
     }
 
-    async fn new_session(
-        &self,
-        pi_handle: &PiHandle,
-        notify: &Arc<Notify>,
-    ) -> Result<(), String> {
-        let cmd = serde_json::json!({ "type": "new_session" });
-        pi_handle
-            .send(&cmd)
+    /// Create a new session in Pi. Waits for Pi's response and checks if it was cancelled.
+    async fn new_session(&self, pi_handle: &PiHandle) -> Result<(), String> {
+        let mut cmd = serde_json::json!({ "type": "new_session" });
+        let rx = pi_handle
+            .send_with_id(&mut cmd)
             .await
             .map_err(|e| format!("Failed to create new session: {}", e))?;
 
-        // Wait for Pi to process the new_session command.
-        // Pi emits session events; we use a short timeout to consume any
-        // pending notification and allow the session to initialize.
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_millis(300),
-            notify.notified(),
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            rx,
         )
-        .await;
+        .await
+        .map_err(|_| "new_session timed out after 10s".to_string())?
+        .map_err(|_| "new_session response channel dropped".to_string())?;
+
+        let cancelled = response
+            .get("data")
+            .and_then(|d| d.get("cancelled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if cancelled {
+            return Err("new_session was cancelled by an extension".to_string());
+        }
+
         Ok(())
     }
 

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useStreamStore, type ChatMessage, type ToolCallMessage, type SystemMessage } from "../../stores/stream";
-import { sendPrompt, abortAgent, steerAgent, followUp, newSession, listSessions, switchSession, deleteSession, getPiState, orchestrate, type SessionInfo } from "../../lib/ipc";
+import { useStreamStore, type ChatMessage, type ToolCallMessage, type SystemMessage, type PiCommand } from "../../stores/stream";
+import { sendPrompt, abortAgent, steerAgent, followUp, newSession, listSessions, switchSession, deleteSession, getPiState, orchestrate, forkSession, getCommands, type SessionInfo } from "../../lib/ipc";
 import { LogsTab } from "./LogsTab";
 import { PlanTab } from "./PlanTab";
+import { SessionHistoryTab } from "./SessionHistoryTab";
 import { MessageRenderer } from "./MessageRenderer";
 import { ClarifyCard } from "./ClarifyCard";
 import { PipelineProgress } from "./PipelineProgress";
@@ -11,7 +12,7 @@ import { useApprovalStore } from "../../stores/approvalStore";
 import { useOrchestrationStore, isOrchestrationStalled } from "../../stores/orchestrationStore";
 import css from "./AgentPanel.module.css";
 
-type TabId = "chat" | "logs" | "plan";
+type TabId = "chat" | "logs" | "plan" | "history";
 
 // ── Attachment types ────────────────────────────────────────
 
@@ -24,8 +25,9 @@ interface ImageAttachment {
 // ── Serialization helpers ───────────────────────────────────
 
 const SNIPPET_ATTR = "data-snippet";
+const PASTE_ATTR = "data-paste";
 
-/** Serialize contentEditable → text with snippet labels */
+/** Serialize contentEditable → text with snippet labels and paste blocks */
 function serializeComposer(el: HTMLElement): string {
   let result = "";
   for (const node of Array.from(el.childNodes)) {
@@ -36,6 +38,9 @@ function serializeComposer(el: HTMLElement): string {
       if (elem.hasAttribute(SNIPPET_ATTR)) {
         const label = elem.getAttribute("data-label") ?? "";
         result += `@${label}`;
+      } else if (elem.hasAttribute(PASTE_ATTR)) {
+        // Expand paste chip back to full text
+        result += elem.getAttribute(PASTE_ATTR) ?? "";
       } else if (elem.tagName === "BR") {
         result += "\n";
       } else {
@@ -97,6 +102,41 @@ function createSnippetNode(id: string, label: string): HTMLSpanElement {
 
   return chip;
 }
+
+/** Create a compact paste chip: [Pasted text... N lines] */
+function createPasteNode(text: string): HTMLSpanElement {
+  const lines = text.split("\n");
+  const lineCount = lines.length;
+  // Show a short preview: first non-empty line, truncated
+  const preview = (lines.find((l) => l.trim()) ?? "").trim();
+  const previewText = preview.length > 30 ? preview.slice(0, 30) + "..." : preview;
+
+  const chip = document.createElement("span");
+  chip.setAttribute(PASTE_ATTR, text);
+  chip.contentEditable = "false";
+  chip.className = css.pasteChip ?? "";
+  chip.title = text.length > 500 ? text.slice(0, 500) + "..." : text;
+
+  const label = document.createElement("span");
+  label.textContent = previewText
+    ? `${previewText} [${lineCount} lines]`
+    : `[Pasted text... ${lineCount} lines]`;
+  chip.appendChild(label);
+
+  const btn = document.createElement("span");
+  btn.textContent = "\u00D7";
+  btn.className = css.snippetChipX ?? "";
+  btn.onmousedown = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    chip.remove();
+  };
+  chip.appendChild(btn);
+
+  return chip;
+}
+
+const PASTE_LINE_THRESHOLD = 3;
 
 function placeCaretAtEnd(el: HTMLElement) {
   const range = document.createRange();
@@ -349,6 +389,10 @@ export function AgentPanel() {
   const lastHeartbeat = useOrchestrationStore((s) => s.lastHeartbeat);
   const [forceOrchestrate, setForceOrchestrate] = useState(false);
   const [isStalled, setIsStalled] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [commandFilter, setCommandFilter] = useState("");
+  const [commandIndex, setCommandIndex] = useState(0);
+  const piCommands = useStreamStore((s) => s.piCommands);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -401,6 +445,11 @@ export function AgentPanel() {
     };
     snippetListeners.add(handler);
     return () => { snippetListeners.delete(handler); };
+  }, []);
+
+  // Fetch Pi commands on mount for "/" palette
+  useEffect(() => {
+    getCommands().catch(() => {});
   }, []);
 
   // ── Send ─────────────────────────────────────────
@@ -470,10 +519,12 @@ export function AgentPanel() {
     setImages((prev) => prev.filter((img) => img.id !== id));
   }, []);
 
-  // Paste images
+  // Paste: images become attachments, multiline text becomes compact chips
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
+
+    // Check for images first
     const imageFiles: File[] = [];
     for (const item of Array.from(items)) {
       if (item.type.startsWith("image/")) {
@@ -484,7 +535,18 @@ export function AgentPanel() {
     if (imageFiles.length > 0) {
       e.preventDefault();
       addImageFiles(imageFiles);
+      return;
     }
+
+    // Check for multiline text — compact into a chip
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    const lineCount = text.split("\n").length;
+    if (lineCount >= PASTE_LINE_THRESHOLD && composerRef.current) {
+      e.preventDefault();
+      const chip = createPasteNode(text);
+      insertNodeAtCursor(composerRef.current, chip);
+    }
+    // Single-line pastes fall through to default browser behavior
   }, [addImageFiles]);
 
   // Drag & drop
@@ -507,16 +569,75 @@ export function AgentPanel() {
 
   // ── Keyboard ─────────────────────────────────────
 
+  const getFilteredCommands = useCallback(() => {
+    return piCommands
+      .filter((c) => c.name.toLowerCase().includes(commandFilter.toLowerCase()))
+      .slice(0, 10);
+  }, [piCommands, commandFilter]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Close command palette on Escape
+    if (e.key === "Escape" && showCommandPalette) {
+      setShowCommandPalette(false);
+      setCommandFilter("");
+      setCommandIndex(0);
+      return;
+    }
+    // Arrow key navigation in command palette
+    if (showCommandPalette) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const filtered = getFilteredCommands();
+        setCommandIndex((i) => Math.min(i + 1, filtered.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCommandIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (showCommandPalette) {
+        const filtered = getFilteredCommands();
+        if (filtered.length > 0) {
+          handleSelectCommand(filtered[Math.min(commandIndex, filtered.length - 1)]);
+        }
+        return;
+      }
       // Cmd/Ctrl+Enter forces orchestration
       if (e.metaKey || e.ctrlKey) {
         setForceOrchestrate(true);
       }
       handleSend();
     }
-  }, [handleSend]);
+  }, [handleSend, showCommandPalette, getFilteredCommands, commandIndex]);
+
+  const handleSelectCommand = useCallback((cmd: PiCommand) => {
+    setShowCommandPalette(false);
+    setCommandFilter("");
+    if (composerRef.current) composerRef.current.innerHTML = "";
+    // Send the command as a prompt — Pi expects commands prefixed with /
+    const cmdText = `/${cmd.name}`;
+    addUserMessage(cmdText);
+    sendPrompt(cmdText).catch(console.error);
+  }, [addUserMessage]);
+
+  // Track "/" input for command palette
+  const handleInput = useCallback(() => {
+    if (!composerRef.current) return;
+    const text = composerRef.current.textContent || "";
+    if (text.startsWith("/")) {
+      setShowCommandPalette(true);
+      setCommandFilter(text.slice(1));
+      setCommandIndex(0);
+    } else if (showCommandPalette) {
+      setShowCommandPalette(false);
+      setCommandFilter("");
+      setCommandIndex(0);
+    }
+  }, [showCommandPalette]);
 
   return (
     <div style={s.container}>
@@ -539,6 +660,12 @@ export function AgentPanel() {
           onClick={() => setActiveTab("plan")}
         >
           Plan
+        </button>
+        <button
+          style={{ ...s.tab, ...(activeTab === "history" ? s.tabActive : {}) }}
+          onClick={() => setActiveTab("history")}
+        >
+          History
         </button>
         <div style={{ flex: 1 }} />
         {activeTab === "chat" && (
@@ -588,7 +715,7 @@ export function AgentPanel() {
           currentSessionId={useStreamStore.getState().sessionId}
           onSwitch={async (file) => {
             setShowSessions(false);
-            useStreamStore.setState({ sessionStatus: "switching" });
+            useStreamStore.setState({ sessionStatus: "loading" });
             try { await switchSession(file); } catch (e) { console.error("Switch session failed:", e); }
           }}
           onDelete={async (file) => {
@@ -620,7 +747,7 @@ export function AgentPanel() {
         <>
           {orcPhase !== "idle" && <PipelineProgress />}
           <div ref={scrollRef} className={css.chatScroll} onScroll={handleChatScroll}>
-            {sessionStatus === "loading" || sessionStatus === "switching" ? (
+            {sessionStatus === "loading" ? (
               <div style={s.sessionLoading}>Loading session...</div>
             ) : messages.length === 0 ? (
               <EmptyState />
@@ -674,15 +801,45 @@ export function AgentPanel() {
 
             {/* Input row */}
             <div className={css.inputRow}>
-              <div
-                ref={composerRef}
-                className={css.composerField}
-                contentEditable
-                role="textbox"
-                data-placeholder={isStreaming ? "Steer agent... (Enter to redirect)" : "Message Tide... (Enter to send, Shift+Enter new line)"}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-              />
+              <div style={{ position: "relative", flex: 1 }}>
+                <div
+                  ref={composerRef}
+                  className={css.composerField}
+                  contentEditable
+                  role="textbox"
+                  data-placeholder={isStreaming ? "Steer agent... (Enter to redirect)" : "Message Tide... (Enter to send, / for commands)"}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  onInput={handleInput}
+                />
+                {showCommandPalette && piCommands.length > 0 && (() => {
+                  const filtered = getFilteredCommands();
+                  return (
+                    <div style={s.commandPalette}>
+                      {filtered.length > 0 ? filtered.map((cmd, i) => (
+                        <button
+                          key={cmd.name}
+                          ref={i === commandIndex ? (el) => { el?.scrollIntoView({ block: "nearest" }); } : undefined}
+                          style={{ ...s.commandItem, ...(i === commandIndex ? s.commandItemActive : {}) }}
+                          onClick={() => handleSelectCommand(cmd)}
+                          onMouseEnter={() => setCommandIndex(i)}
+                          onMouseDown={(e) => e.preventDefault()}
+                        >
+                          <div style={s.commandRow}>
+                            <span style={s.commandName}>/{cmd.name}</span>
+                            {cmd.type && <span style={s.commandBadge}>{cmd.type}</span>}
+                          </div>
+                          {cmd.description && (
+                            <span style={s.commandDesc}>{cmd.description}</span>
+                          )}
+                        </button>
+                      )) : (
+                        <div style={s.commandEmpty}>No matching commands</div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
               <div className={css.composerToolbar}>
                 <button
                   className={css.toolbarBtn}
@@ -735,8 +892,10 @@ export function AgentPanel() {
         </>
       ) : activeTab === "logs" ? (
         <LogsTab />
-      ) : (
+      ) : activeTab === "plan" ? (
         <PlanTab />
+      ) : (
+        <SessionHistoryTab />
       )}
     </div>
   );
@@ -796,6 +955,31 @@ const ChatBubble = React.memo(function ChatBubble({ message }: { message: ChatMe
               ? <StreamingMessageRenderer content={message.content} />
               : <MessageRenderer content={message.content} />
             }
+            {!message.streaming && (
+              <div style={s.execSummaryWrap}>
+                <span style={s.execStatusBadge(message.executionStatus)}>
+                  {message.executionStatus === "changed_files"
+                    ? "CHANGED FILES"
+                    : message.executionStatus === "executed_no_changes"
+                    ? "EXECUTED (NO CHANGES)"
+                    : "ANALYZED"}
+                </span>
+                {message.changedFiles && message.changedFiles.length > 0 && (
+                  <div style={s.execFilesList}>
+                    {message.changedFiles.map((f) => (
+                      <span key={f} style={s.execFileItem}>{f}</span>
+                    ))}
+                  </div>
+                )}
+                <button
+                  style={s.forkButton}
+                  onClick={() => forkSession().catch(console.error)}
+                  title="Fork session from this point"
+                >
+                  Fork
+                </button>
+              </div>
+            )}
           </div>
         </div>
       );
@@ -1007,7 +1191,7 @@ function ImageIcon() {
 const s: Record<string, React.CSSProperties> = {
   container: { display: "flex", flexDirection: "column", height: "100%", background: "var(--bg-secondary)", position: "relative" as const },
   tabBar: { display: "flex", alignItems: "center", height: 34, padding: "0 4px", background: "var(--bg-tertiary)", borderBottom: "1px solid var(--border)", gap: 0 },
-  tab: { padding: "0 14px", height: "100%", fontSize: "var(--font-size-sm)", fontFamily: "var(--font-ui)", fontWeight: 500, color: "var(--text-secondary)", background: "transparent", border: "none", borderBottom: "2px solid transparent", cursor: "pointer", transition: "color 0.15s" },
+  tab: { padding: "0 14px", height: "100%", fontSize: "var(--font-size-sm)", fontFamily: "var(--font-ui)", fontWeight: 500, color: "var(--text-secondary)", background: "transparent", border: "none", borderBottomWidth: 2, borderBottomStyle: "solid", borderBottomColor: "transparent", cursor: "pointer", transition: "color 0.15s" },
   tabActive: { color: "var(--text-bright)", borderBottomColor: "var(--accent)" },
   sessionControls: { display: "flex", alignItems: "center", gap: 2, marginRight: 4 },
   sessionBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, background: "transparent", border: "none", borderRadius: "var(--radius-sm)", color: "var(--text-secondary)", cursor: "pointer" },
@@ -1017,6 +1201,32 @@ const s: Record<string, React.CSSProperties> = {
   userBubble: { fontFamily: "var(--font-ui)", fontSize: "var(--font-size-sm)", lineHeight: 1.55, color: "var(--text-bright)", padding: "8px 12px", background: "rgba(122, 162, 247, 0.08)", borderRadius: "var(--radius-md)", border: "1px solid rgba(122, 162, 247, 0.15)", whiteSpace: "pre-wrap" as const, wordBreak: "break-word" as const },
   assistantRow: { display: "flex", flexDirection: "column", gap: 4, marginTop: 8 },
   assistantBubble: { padding: "2px 0" },
+  execSummaryWrap: { marginTop: 8, display: "flex", flexDirection: "column", gap: 6 },
+  execStatusBadge: (status?: "analyzed" | "executed_no_changes" | "changed_files") => ({
+    display: "inline-flex",
+    alignItems: "center",
+    width: "fit-content",
+    fontFamily: "var(--font-mono)",
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: "0.3px",
+    padding: "2px 6px",
+    borderRadius: 999,
+    border: "1px solid var(--border)",
+    color: status === "changed_files" ? "var(--success)" : status === "executed_no_changes" ? "var(--warning, #f0ad4e)" : "var(--text-secondary)",
+    background: status === "changed_files" ? "rgba(34,197,94,0.12)" : status === "executed_no_changes" ? "rgba(240,173,78,0.12)" : "rgba(255,255,255,0.04)",
+  }),
+  execFilesList: { display: "flex", flexDirection: "column", gap: 4 },
+  execFileItem: { fontFamily: "var(--font-mono)", fontSize: "var(--font-size-xs)", color: "var(--text-secondary)", background: "var(--bg-primary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "4px 8px", width: "fit-content" },
+  forkButton: { fontFamily: "var(--font-ui)", fontSize: "var(--font-size-xs)", color: "var(--text-secondary)", background: "none", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "2px 8px", cursor: "pointer", width: "fit-content", marginTop: 2, opacity: 0.7, transition: "opacity 0.15s" } as React.CSSProperties,
+  commandPalette: { position: "absolute" as const, bottom: "100%", left: 0, right: 0, maxHeight: 240, overflowY: "auto" as const, background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", marginBottom: 4, boxShadow: "0 -4px 12px rgba(0,0,0,0.3)", zIndex: 10 },
+  commandItem: { display: "flex", flexDirection: "column" as const, gap: 1, padding: "6px 12px", width: "100%", textAlign: "left" as const, background: "transparent", border: "none", borderBottom: "1px solid var(--border)", cursor: "pointer", fontFamily: "var(--font-ui)" },
+  commandItemActive: { background: "rgba(122, 162, 247, 0.1)" },
+  commandRow: { display: "flex", alignItems: "center" as const, gap: 8 },
+  commandName: { fontSize: "var(--font-size-sm)", fontFamily: "var(--font-mono)", color: "var(--accent)" },
+  commandBadge: { fontSize: 9, fontFamily: "var(--font-ui)", color: "var(--text-secondary)", background: "var(--bg-tertiary)", padding: "0 5px", borderRadius: 3, textTransform: "uppercase" as const, letterSpacing: "0.3px", flexShrink: 0 },
+  commandDesc: { fontSize: "var(--font-size-xs)", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
+  commandEmpty: { padding: "8px 12px", fontSize: "var(--font-size-xs)", color: "var(--text-secondary)", textAlign: "center" as const },
   streamingDot: { display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", animation: "pulse 1s ease-in-out infinite" },
   toolRow: { margin: "4px 0" },
   toolName: { fontFamily: "var(--font-mono)", fontSize: "var(--font-size-xs)", color: "var(--text-bright)", flex: 1 },

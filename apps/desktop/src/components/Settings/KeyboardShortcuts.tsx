@@ -12,6 +12,7 @@ const SHORTCUTS: { category: string; items: { keys: string; description: string 
   {
     category: "Editor",
     items: [
+      { keys: "Cmd+S", description: "Save File" },
       { keys: "Cmd+Shift+T", description: "Tag Selected Region (Editor & Terminal)" },
     ],
   },

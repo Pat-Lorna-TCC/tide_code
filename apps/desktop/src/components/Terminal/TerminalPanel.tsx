@@ -3,6 +3,7 @@ import { useTerminalStore } from "../../stores/terminalStore";
 import { useWorkspaceStore } from "../../stores/workspace";
 import { ptyCreate, ptyKill } from "../../lib/ipc";
 import { TerminalInstance } from "./TerminalInstance";
+import { showError } from "../../stores/toastStore";
 import styles from "./TerminalPanel.module.css";
 
 export function TerminalPanel() {
@@ -15,6 +16,7 @@ export function TerminalPanel() {
       addTab(ptyId);
     } catch (err) {
       console.error("[Terminal] Failed to spawn:", err);
+      showError(`Terminal spawn failed: ${err}`);
     }
   }, [addTab]);
 

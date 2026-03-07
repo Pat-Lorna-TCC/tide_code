@@ -5,7 +5,7 @@ import { useWorkspaceStore, type FsEntry } from "./stores/workspace";
 import { useUiStore } from "./stores/ui";
 import { useStreamStore } from "./stores/stream";
 import { useCommandStore } from "./stores/commandStore";
-import { getPiStatus, getPiState, getAvailableModels, getMessages, openWorkspace, restartPi } from "./lib/ipc";
+import { getPiStatus, getPiState, getAvailableModels, getMessages, getSessionStats, openWorkspace, restartPi, getLaunchPath } from "./lib/ipc";
 import { onPiEvent, onPiReady } from "./lib/pi-events";
 import { SplitPane } from "./components/Layout/SplitPane";
 import { GlobalLoader } from "./components/GlobalLoader";
@@ -34,6 +34,8 @@ import { useIndexStore } from "./stores/indexStore";
 import { initOrchestrationListener } from "./stores/orchestrationStore";
 import { listen } from "@tauri-apps/api/event";
 import { checkForUpdates } from "./lib/updater";
+import { Toasts } from "./components/Toasts";
+import { Dashboard, saveRecentWorkspace } from "./components/Dashboard/Dashboard";
 import "./styles/global.css";
 
 interface RawFsEntry {
@@ -60,6 +62,25 @@ export function App() {
   const terminalVisible = useTerminalStore((s) => s.visible);
 
   const { handlePiEvent } = useStreamStore();
+  const piReadyFired = useRef(false);
+
+  /** Fetch Pi state, models, messages, stats. Called on pi_ready and on first status-poll connect. */
+  const fetchPiState = useCallback((source: "pi_ready" | "poll") => {
+    // pi_ready is authoritative — always fetch. Poll only fetches if pi_ready hasn't fired yet.
+    if (source === "poll" && piReadyFired.current) return;
+    if (source === "pi_ready") piReadyFired.current = true;
+    console.log(`[Tide] Fetching state + models + history + stats (source: ${source})`);
+    getPiState().catch(() => {});
+    getAvailableModels().catch(() => {});
+    getMessages().catch(() => {});
+    getSessionStats().catch(() => {});
+    // Retry models in case registry is still initializing
+    setTimeout(() => {
+      if (useStreamStore.getState().availableModels.length === 0) {
+        getAvailableModels().catch(() => {});
+      }
+    }, 2000);
+  }, []);
 
   // Initialize listeners on mount
   useEffect(() => {
@@ -75,13 +96,10 @@ export function App() {
       if (!cancelled) handlePiEvent(event);
     });
 
-    // Also listen for pi_ready event (backup for status polling)
+    // Also listen for pi_ready event (authoritative signal that Pi is ready)
     const readyCleanup = onPiReady(() => {
       if (cancelled) return;
-      console.log("[Tide] pi_ready event — requesting state + models + history");
-      getPiState().catch(() => {});
-      getAvailableModels().catch(() => {});
-      getMessages().catch(() => {});
+      fetchPiState("pi_ready");
     });
 
     // Listen for code index progress events
@@ -115,7 +133,7 @@ export function App() {
       indexProgressCleanup.then((unlisten) => unlisten());
       indexCompleteCleanup.then((unlisten) => unlisten());
     };
-  }, [handlePiEvent]);
+  }, [handlePiEvent, fetchPiState]);
 
   // Poll Pi status — when first connected, fetch models + state
   useEffect(() => {
@@ -130,18 +148,7 @@ export function App() {
         // On first connection (or reconnection), request models + state
         if (connected && !wasConnected) {
           wasConnected = true;
-          console.log("[Tide] Pi connected — requesting state + models + history");
-          getPiState().catch(() => {});
-          getAvailableModels().catch(() => {});
-          // Restore chat history from Pi's current session (Pi starts with -c)
-          getMessages().catch(() => {});
-          // Retry in case model registry is still initializing
-          setTimeout(() => {
-            if (useStreamStore.getState().availableModels.length === 0) {
-              console.log("[Tide] Retrying getAvailableModels (2s)");
-              getAvailableModels().catch(() => {});
-            }
-          }, 2000);
+          fetchPiState("poll");
         }
         if (!connected) wasConnected = false;
       } catch {
@@ -155,7 +162,7 @@ export function App() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [setStatus]);
+  }, [setStatus, fetchPiState]);
 
   // Refresh file tree when window regains focus (catches external file changes)
   useEffect(() => {
@@ -166,6 +173,23 @@ export function App() {
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
   }, []);
+
+  // Auto-open workspace from CLI args (e.g. `tide /path/to/project`)
+  useEffect(() => {
+    let cancelled = false;
+    getLaunchPath().then(async (launchPath) => {
+      if (cancelled || !launchPath) return;
+      try {
+        const entries = await openWorkspace(launchPath);
+        setRootPath(launchPath);
+        setFileTree(toFsEntries(entries));
+        saveRecentWorkspace(launchPath);
+      } catch (e) {
+        console.error("[Tide] Failed to open CLI launch path:", e);
+      }
+    });
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Register global keyboard shortcuts
   useEffect(() => {
@@ -190,6 +214,9 @@ export function App() {
       } else if (meta && e.key === "o") {
         e.preventDefault();
         handleOpenFolderRef.current();
+      } else if (meta && e.key === "s") {
+        e.preventDefault();
+        useWorkspaceStore.getState().saveActiveFile();
       } else if (meta && e.shiftKey && e.key === "f") {
         e.preventDefault();
         useUiStore.getState().setSidebarPanel("search");
@@ -210,6 +237,13 @@ export function App() {
         category: "File",
         shortcut: "Cmd+O",
         execute: () => handleOpenFolderRef.current(),
+      },
+      {
+        id: "tide.saveFile",
+        label: "Save File",
+        category: "File",
+        shortcut: "Cmd+S",
+        execute: () => useWorkspaceStore.getState().saveActiveFile(),
       },
       {
         id: "tide.toggleFileTree",
@@ -277,10 +311,12 @@ export function App() {
         const entries = await openWorkspace(folderPath);
         setRootPath(folderPath);
         setFileTree(toFsEntries(entries));
+        saveRecentWorkspace(folderPath);
         // Clear old session state before restarting Pi with new workspace CWD
         useStreamStore.getState().clearMessages();
         useStreamStore.setState({ sessionId: "", sessionName: "", sessionDir: "", sessionStatus: "idle", hasAutoTitled: false });
         // Restart Pi so its CWD matches the new workspace
+        piReadyFired.current = false;
         await restartPi();
         // Reload workspace-scoped data (permissions, settings)
         usePermissionStore.getState().load();
@@ -312,7 +348,7 @@ export function App() {
             content={activeTab.content}
             language={activeTab.language}
             path={activeTab.path}
-            readOnly={true}
+            readOnly={false}
             onChange={(value) => updateTabContent(activeTab.path, value)}
           />
         ) : (
@@ -399,13 +435,28 @@ export function App() {
             </SplitPane>
           )
         ) : (
-          <div style={s.welcome}>
-            <h2 style={s.welcomeTitle}>Welcome to Tide</h2>
-            <p style={s.welcomeText}>Open a folder to get started</p>
-            <button style={s.welcomeBtn} onClick={handleOpenFolder}>
-              Open Folder
-            </button>
-          </div>
+          <Dashboard
+            onOpenFolder={handleOpenFolder}
+            onOpenWorkspace={async (wsPath) => {
+              startLoading("Opening workspace...");
+              try {
+                const entries = await openWorkspace(wsPath);
+                setRootPath(wsPath);
+                setFileTree(toFsEntries(entries));
+                saveRecentWorkspace(wsPath);
+                useStreamStore.getState().clearMessages();
+                useStreamStore.setState({ sessionId: "", sessionName: "", sessionDir: "", sessionStatus: "idle", hasAutoTitled: false });
+                piReadyFired.current = false;
+        await restartPi();
+                usePermissionStore.getState().load();
+                useSettingsStore.getState().load();
+              } catch (e) {
+                console.error("Failed to open workspace:", e);
+              } finally {
+                stopLoading();
+              }
+            }}
+          />
         )}
       </div>
 
@@ -427,6 +478,7 @@ export function App() {
       <CommandPalette />
       <ContextInspector />
       <ApprovalDialog />
+      <Toasts />
     </div>
   );
 }
@@ -523,27 +575,6 @@ const s: Record<string, React.CSSProperties> = {
     height: "100%",
     color: "var(--text-secondary)",
     fontStyle: "italic",
-  },
-  welcome: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    height: "100%",
-    gap: 16,
-  },
-  welcomeTitle: { fontSize: 24, fontWeight: 300, color: "var(--text-bright)" },
-  welcomeText: { color: "var(--text-secondary)", fontSize: "var(--font-size-lg)" },
-  welcomeBtn: {
-    padding: "8px 24px",
-    fontFamily: "var(--font-ui)",
-    fontSize: "var(--font-size-md)",
-    fontWeight: 500,
-    color: "white",
-    background: "var(--accent)",
-    border: "none",
-    borderRadius: "var(--radius-md)",
-    cursor: "pointer",
   },
   bottomBar: {
     display: "flex",

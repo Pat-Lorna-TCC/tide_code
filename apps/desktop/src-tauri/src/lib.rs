@@ -20,6 +20,8 @@ pub struct AppState {
     pub indexer: Arc<Mutex<Option<indexer::IndexerState>>>,
     pub agent_end_notify: Arc<Notify>,
     pub pty_manager: StdMutex<pty::PtyManager>,
+    pub orc_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub orc_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // ── Pi Agent Commands ───────────────────────────────────────
@@ -116,6 +118,7 @@ async fn restart_pi(
 
             // Re-wire event forwarding
             let event_rx = conn.event_rx.clone();
+            let pending = conn.pending.clone();
             let handle = app_handle.clone();
             let agent_notify = state.agent_end_notify.clone();
             tokio::spawn(async move {
@@ -130,6 +133,15 @@ async fn restart_pi(
                             if event_type == "model_select" || event_type.contains("model") {
                                 tracing::debug!("Forwarding model event (restart): {} — {}", event_type,
                                     serde_json::to_string(&event).unwrap_or_default().chars().take(200).collect::<String>());
+                            }
+                            // Route response events to pending request waiters
+                            if event_type == "response" {
+                                if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                                    let mut map = pending.lock().await;
+                                    if let Some(sender) = map.remove(id) {
+                                        let _ = sender.send(event.clone());
+                                    }
+                                }
                             }
                             if let Err(e) = handle.emit("pi_event", &event) {
                                 tracing::error!("Failed to emit pi_event ({}): {}", event_type, e);
@@ -164,6 +176,30 @@ async fn restart_pi(
             Err(format!("Failed to restart Pi: {}", e))
         }
     }
+}
+
+/// Get version info for Tide and Pi.
+#[tauri::command]
+fn get_version_info() -> Result<serde_json::Value, String> {
+    let tide_version = env!("CARGO_PKG_VERSION");
+
+    // Try to read Pi version from node_modules package.json
+    let pi_version = ["node_modules/@mariozechner/pi-coding-agent/package.json",
+                       "../../node_modules/@mariozechner/pi-coding-agent/package.json",
+                       "../../../node_modules/@mariozechner/pi-coding-agent/package.json"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .and_then(|contents| {
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .ok()
+                .and_then(|v| v["version"].as_str().map(String::from))
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(serde_json::json!({
+        "tide": tide_version,
+        "pi": pi_version,
+    }))
 }
 
 /// Get Pi connection status.
@@ -207,12 +243,17 @@ async fn get_available_models(
 }
 
 /// Set the model Pi should use. Requires provider + modelId.
+/// Blocked during orchestration to prevent model switching mid-pipeline.
 #[tauri::command]
 async fn set_pi_model(
     state: tauri::State<'_, AppState>,
     provider: String,
     model_id: String,
 ) -> Result<(), String> {
+    if state.orc_active.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Cannot change model during orchestration".to_string());
+    }
+
     let pi_guard = state.pi.lock().await;
     let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
 
@@ -256,16 +297,25 @@ async fn get_session_stats(
 }
 
 /// Compact the Pi conversation context.
+/// Uses send_with_id to wait for Pi's response — Pi docs require awaiting compact completion.
 #[tauri::command]
 async fn compact_context(
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let pi_guard = state.pi.lock().await;
     let conn = pi_guard.as_ref().ok_or("Pi not connected")?;
+    let handle = conn.handle();
+    drop(pi_guard); // Release lock before awaiting response
 
-    let cmd = serde_json::json!({ "type": "compact" });
-    conn.send(&cmd).await.map_err(|e| e.to_string())?;
-    Ok(())
+    let mut cmd = serde_json::json!({ "type": "compact" });
+    let rx = handle.send_with_id(&mut cmd).await.map_err(|e| e.to_string())?;
+
+    // Wait for response with 30s timeout (same as orchestrator)
+    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+        Ok(Ok(val)) => Ok(val),
+        Ok(Err(_)) => Err("Compact response channel closed".to_string()),
+        Err(_) => Err("Compact timed out after 30s".to_string()),
+    }
 }
 
 /// List available Pi sessions by scanning the session directory.
@@ -574,11 +624,13 @@ async fn read_router_config(
 }
 
 /// Write the router config to .tide/router-config.json in the workspace.
+/// Merges new values into any existing config to preserve fields like tierModels.
 #[tauri::command]
 async fn write_router_config(
     state: tauri::State<'_, AppState>,
     enabled: bool,
     auto_switch: bool,
+    tier_models: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let root = state.workspace_root.lock().await;
     let workspace = root.as_ref().ok_or("No workspace open")?;
@@ -589,7 +641,21 @@ async fn write_router_config(
     }
 
     let config_path = tide_dir.join("router-config.json");
-    let config = serde_json::json!({ "enabled": enabled, "autoSwitch": auto_switch });
+
+    // Read existing config to preserve extra fields
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    config["enabled"] = serde_json::json!(enabled);
+    config["autoSwitch"] = serde_json::json!(auto_switch);
+    if let Some(tiers) = tier_models {
+        config["tierModels"] = tiers;
+    }
+
     std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap())
         .map_err(|e| e.to_string())?;
 
@@ -783,6 +849,11 @@ async fn orchestrate(
     }; // Lock released here
 
     let notify = state.agent_end_notify.clone();
+    let cancel_flag = state.orc_cancel.clone();
+    let active_flag = state.orc_active.clone();
+    // Reset cancel flag before starting
+    cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    active_flag.store(true, std::sync::atomic::Ordering::Relaxed);
     let handle = app_handle.clone();
 
     tokio::spawn(async move {
@@ -806,11 +877,12 @@ async fn orchestrate(
         });
 
         let orc = orchestrator::Orchestrator::new(workspace);
-        let result = orc.run(prompt, pi_handle, handle.clone(), notify).await;
+        let result = orc.run(prompt, pi_handle, handle.clone(), notify, cancel_flag).await;
 
-        // Stop heartbeat
+        // Stop heartbeat and mark orchestration inactive
         heartbeat_flag.store(false, std::sync::atomic::Ordering::Relaxed);
         heartbeat_task.abort();
+        active_flag.store(false, std::sync::atomic::Ordering::Relaxed);
 
         if let Err(e) = result {
             tracing::error!("Orchestration failed: {}", e);
@@ -827,6 +899,32 @@ async fn orchestrate(
         }
     });
 
+    Ok(())
+}
+
+/// Cancel a running orchestration pipeline.
+#[tauri::command]
+async fn cancel_orchestration(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    state.orc_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Also abort the current Pi agent operation so it stops immediately
+    let pi_guard = state.pi.lock().await;
+    if let Some(conn) = pi_guard.as_ref() {
+        let cmd = serde_json::json!({ "type": "abort" });
+        let _ = conn.send(&cmd).await;
+    }
+    let _ = app_handle.emit(
+        "orchestration_event",
+        serde_json::json!({
+            "phase": "failed",
+            "planId": serde_json::Value::Null,
+            "currentStep": 0,
+            "totalSteps": 0,
+            "message": "Orchestration cancelled by user",
+        }),
+    );
     Ok(())
 }
 
@@ -1216,6 +1314,11 @@ async fn fs_create_file(path: String, content: Option<String>) -> Result<(), Str
 }
 
 #[tauri::command]
+async fn fs_write_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn fs_create_dir(path: String) -> Result<(), String> {
     std::fs::create_dir_all(&path).map_err(|e| e.to_string())
 }
@@ -1526,6 +1629,35 @@ fn parse_skill_file(path: &std::path::Path, source: &str) -> Option<SkillInfo> {
     })
 }
 
+/// Install or remove a Pi skill/package via `pi install <source>` or `pi remove <source>`.
+#[tauri::command]
+async fn manage_skill(
+    action: String,
+    source: String,
+) -> Result<String, String> {
+    let pi_path = sidecar::resolve_pi_path().map_err(|e| format!("Cannot find Pi binary: {}", e))?;
+
+    let args = match action.as_str() {
+        "install" => vec!["install".to_string(), source],
+        "remove" => vec!["remove".to_string(), source],
+        _ => return Err(format!("Unknown action: {}", action)),
+    };
+
+    let output = std::process::Command::new(&pi_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run pi {}: {}", action, e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(stdout.trim().to_string())
+    } else {
+        Err(format!("{}\n{}", stdout.trim(), stderr.trim()))
+    }
+}
+
 // ── Git Commands ────────────────────────────────────────────
 
 #[tauri::command]
@@ -1553,9 +1685,8 @@ fn resolve_extension_paths() -> Vec<String> {
 
     // Extension base names (without file extension)
     let ext_names = [
-        "tide-safety", "tide-project", "tide-router",
-        "tide-planner", "tide-index", "tide-web-search",
-        "tide-classify",
+        "tide-safety", "tide-project", "tide-session", "tide-router",
+        "tide-planner", "tide-index", "tide-web-search", "tide-auth",
     ];
 
     // 1. Production: bundled pre-transpiled .js extensions in Resources/pi-extensions/
@@ -1604,6 +1735,193 @@ fn resolve_extension_paths() -> Vec<String> {
     paths
 }
 
+// ── CLI Integration ──────────────────────────────────────────
+
+/// Get the workspace path passed via CLI args (e.g. `tide /path/to/project`).
+/// Returns None if no path arg was provided or the app was launched normally.
+#[tauri::command]
+fn get_launch_path() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    // Skip the binary name (args[0]). Look for the first arg that looks like a path
+    // (not a flag starting with -). Tauri may add its own args, so skip those too.
+    for arg in args.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        // Resolve to absolute path
+        let path = std::path::PathBuf::from(arg);
+        let abs = if path.is_absolute() {
+            path
+        } else {
+            // Use TIDE_LAUNCH_DIR if set (our CLI script sets this),
+            // otherwise fall back to current_dir
+            let base = std::env::var("TIDE_LAUNCH_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+            base.join(path)
+        };
+        if abs.is_dir() {
+            return Some(abs.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+// ── OAuth / Subscription Auth ────────────────────────────────────
+
+/// Read Pi's auth.json to get OAuth provider status.
+/// Returns a JSON array of { provider, hasCredentials }.
+#[tauri::command]
+fn oauth_list_providers() -> Result<serde_json::Value, String> {
+    let home = std::env::var("HOME").map_err(|_| "Cannot determine home directory")?;
+    let auth_path = std::path::PathBuf::from(&home).join(".pi/agent/auth.json");
+
+    if !auth_path.exists() {
+        // No auth file = no OAuth credentials anywhere
+        return Ok(serde_json::json!([]));
+    }
+
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|e| format!("Failed to read auth.json: {}", e))?;
+    let data: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse auth.json: {}", e))?;
+
+    // auth.json stores credentials keyed by provider name
+    // Each entry can be { apiKey: "..." } or { oauth: { refresh, access, expires } }
+    let mut providers = Vec::new();
+    if let Some(obj) = data.as_object() {
+        for (key, value) in obj {
+            let has_oauth = value.get("oauth").is_some();
+            let has_api_key = value.get("apiKey").is_some() || value.get("api_key").is_some();
+            if has_oauth || has_api_key {
+                providers.push(serde_json::json!({
+                    "provider": key,
+                    "authType": if has_oauth { "oauth" } else { "api_key" },
+                    "hasCredentials": true,
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::json!(providers))
+}
+
+/// Remove OAuth credentials for a provider from Pi's auth.json.
+#[tauri::command]
+fn oauth_logout(provider: String) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|_| "Cannot determine home directory")?;
+    let auth_path = std::path::PathBuf::from(&home).join(".pi/agent/auth.json");
+
+    if !auth_path.exists() {
+        return Ok("No credentials to remove.".to_string());
+    }
+
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|e| format!("Failed to read auth.json: {}", e))?;
+    let mut data: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse auth.json: {}", e))?;
+
+    if let Some(obj) = data.as_object_mut() {
+        if obj.remove(&provider).is_some() {
+            let updated = serde_json::to_string_pretty(&data)
+                .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
+            std::fs::write(&auth_path, updated)
+                .map_err(|e| format!("Failed to write auth.json: {}", e))?;
+            return Ok(format!("Logged out from {}.", provider));
+        }
+    }
+
+    Ok(format!("No credentials found for {}.", provider))
+}
+
+/// Install the `tide` CLI command to /usr/local/bin.
+/// Uses tokio + osascript to prompt for admin privileges on macOS.
+#[tauri::command]
+async fn install_cli(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let cli_content = r#"#!/bin/bash
+# Tide CLI — open folders in Tide IDE
+# Installed by Tide > Settings > Install CLI
+
+if [ -z "$1" ]; then
+  open -a Tide
+else
+  # Resolve to absolute path
+  TARGET=$(cd "$1" 2>/dev/null && pwd || echo "$1")
+  # Pass the launch dir so the app can resolve relative paths
+  TIDE_LAUNCH_DIR="$(pwd)" open -a Tide --args "$TARGET"
+fi
+"#;
+
+    let cli_path = "/usr/local/bin/tide";
+
+    // Try writing directly first (works if user owns /usr/local/bin)
+    if std::fs::write(cli_path, cli_content).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            let _ = std::fs::set_permissions(cli_path, perms);
+        }
+        let _ = app_handle;
+        return Ok("CLI installed! You can now use `tide .` or `tide /path/to/project` from any terminal.".to_string());
+    }
+
+    // Write the CLI script to a temp file, then use osascript to copy it
+    // with admin privileges (shows native macOS password dialog).
+    let tmp_cli = std::env::temp_dir().join("tide-cli-install.tmp");
+    std::fs::write(&tmp_cli, cli_content)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    let shell_cmd = format!(
+        "mkdir -p /usr/local/bin && cp '{}' /usr/local/bin/tide && chmod +x /usr/local/bin/tide && rm -f '{}'",
+        tmp_cli.display(),
+        tmp_cli.display()
+    );
+    let apple_script = format!(
+        r#"do shell script "{}" with administrator privileges"#,
+        shell_cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+
+    // Run osascript in a blocking thread with explicit /dev/null for stdio.
+    // Tauri's async runtime corrupts inherited file descriptors, so we open
+    // /dev/null explicitly and assign it to stdin/stdout/stderr.
+    let scpt = apple_script.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        use std::fs::File;
+        let dev_null_in = File::open("/dev/null").map_err(|e| format!("open /dev/null: {}", e))?;
+        let dev_null_out = File::create("/dev/null").map_err(|e| format!("create /dev/null: {}", e))?;
+        let dev_null_err = File::create("/dev/null").map_err(|e| format!("create /dev/null: {}", e))?;
+
+        std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &scpt])
+            .stdin(dev_null_in)
+            .stdout(dev_null_out)
+            .stderr(dev_null_err)
+            .status()
+            .map_err(|e| format!("Failed to launch osascript: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_cli);
+        e
+    })?;
+
+    let _ = std::fs::remove_file(&tmp_cli);
+
+    if result.success() {
+        Ok("CLI installed! You can now use `tide .` or `tide /path/to/project` from any terminal.".to_string())
+    } else {
+        // Exit code 1 with osascript typically means user cancelled the dialog
+        let code = result.code().unwrap_or(-1);
+        if code == 1 {
+            Err("Installation cancelled.".to_string())
+        } else {
+            Err(format!("Installation failed (exit code {}).", code))
+        }
+    }
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1624,6 +1942,8 @@ pub fn run() {
             indexer: Arc::new(Mutex::new(None)),
             agent_end_notify: Arc::new(Notify::new()),
             pty_manager: StdMutex::new(pty::PtyManager::new()),
+            orc_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            orc_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
         .setup(|app| {
             let pi_state = app.state::<AppState>().inner().pi.clone();
@@ -1646,6 +1966,7 @@ pub fn run() {
 
                         // Background task: read Pi events, emit to React
                         let event_rx = conn.event_rx.clone();
+                        let pending = conn.pending.clone();
                         let handle = app_handle.clone();
                         let agent_notify = agent_end_notify.clone();
                         tokio::spawn(async move {
@@ -1662,6 +1983,16 @@ pub fn run() {
                                         if event_type == "model_select" || event_type.contains("model") {
                                             tracing::debug!("Forwarding model event: {} — {}", event_type,
                                                 serde_json::to_string(&event).unwrap_or_default().chars().take(200).collect::<String>());
+                                        }
+
+                                        // Route response events to pending request waiters
+                                        if event_type == "response" {
+                                            if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                                                let mut map = pending.lock().await;
+                                                if let Some(sender) = map.remove(id) {
+                                                    let _ = sender.send(event.clone());
+                                                }
+                                            }
                                         }
 
                                         // Emit all Pi events as "pi_event"
@@ -1715,10 +2046,12 @@ pub fn run() {
             get_pi_state,
             respond_ui_request,
             orchestrate,
+            cancel_orchestration,
             open_workspace,
             fs_list_dir,
             fs_read_file,
             fs_create_file,
+            fs_write_file,
             fs_create_dir,
             fs_rename,
             fs_delete,
@@ -1730,6 +2063,7 @@ pub fn run() {
             keychain_delete_key,
             keychain_has_key,
             list_skills,
+            manage_skill,
             git_status,
             git_changed_files,
             tags_load,
@@ -1778,6 +2112,11 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            get_launch_path,
+            install_cli,
+            oauth_list_providers,
+            oauth_logout,
+            get_version_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tide");

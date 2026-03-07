@@ -15,7 +15,7 @@ export function MonacoEditor({
   content,
   language,
   path,
-  readOnly = true,
+  readOnly = false,
   onChange,
 }: MonacoEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);

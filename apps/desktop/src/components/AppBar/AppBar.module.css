@@ -33,6 +33,11 @@
   flex: 1;
 }
 
+.logo {
+  flex-shrink: 0;
+  margin-right: 6px;
+}
+
 .folderName {
   font-weight: 600;
   color: var(--text-bright);

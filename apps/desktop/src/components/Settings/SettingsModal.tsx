@@ -1,4 +1,5 @@
 import { useSettingsStore, type SettingsSection } from "../../stores/settingsStore";
+import { GeneralSettings } from "./GeneralSettings";
 import { ProviderSettings } from "./ProviderSettings";
 import { SafetyPlaceholder } from "./SafetyPlaceholder";
 import { SkillsPlaceholder } from "./SkillsPlaceholder";
@@ -7,6 +8,7 @@ import { RoutingSettings } from "./RoutingSettings";
 import { OrchestratorSettings } from "./OrchestratorSettings";
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
+  { id: "general", label: "General" },
   { id: "providers", label: "Provider Keys" },
   { id: "routing", label: "Routing" },
   { id: "orchestration", label: "Orchestration" },
@@ -39,6 +41,7 @@ export function SettingsPanel() {
 
       {/* Content */}
       <div style={s.content}>
+        {activeSection === "general" && <GeneralSettings />}
         {activeSection === "providers" && <ProviderSettings />}
         {activeSection === "routing" && <RoutingSettings />}
         {activeSection === "orchestration" && <OrchestratorSettings />}

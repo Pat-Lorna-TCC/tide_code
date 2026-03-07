@@ -12,26 +12,15 @@ export default function tideWebSearch(pi: ExtensionAPI) {
     return;
   }
 
-  // Inject system prompt about web search
-  pi.on("before_agent_start", async (_event, _ctx) => {
-    if (!process.env.TAVILY_API_KEY) return;
-    return {
-      systemPrompt:
-        (_event as any).systemPrompt +
-        `\n\n## Web Search Available\n\n` +
-        `You have web search capabilities via Tavily. Use these tools when you need current information:\n` +
-        `- web_search: Search the web for current information, documentation, APIs, etc.\n` +
-        `- web_extract: Extract clean content from a specific URL.\n` +
-        `Use web search when the user asks about recent events, current docs, or anything beyond your training data.\n` +
-        `IMPORTANT: After calling web_search or web_extract, you MUST always provide a text response summarizing the findings for the user. Never end your turn with just a tool call.\n`,
-    };
-  });
-
   // Tool: Web Search
   pi.registerTool({
     name: "web_search",
+    label: "Web Search",
     description:
       "Search the web for current information. Returns relevant results with titles, URLs, and content snippets. Use this when you need up-to-date information, documentation, or answers to questions beyond your training data.",
+    promptSnippet:
+      "Use web_search when you need current information, documentation, or answers beyond your training data. " +
+      "After calling web_search, you MUST always provide a text response summarizing the findings.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       maxResults: Type.Optional(
@@ -154,8 +143,12 @@ export default function tideWebSearch(pi: ExtensionAPI) {
   // Tool: Web Extract (fetch + extract content from a URL)
   pi.registerTool({
     name: "web_extract",
+    label: "Web Extract",
     description:
       "Extract clean, readable content from a specific URL. Use this to read documentation pages, articles, or any web page. Returns the page content as clean text.",
+    promptSnippet:
+      "Use web_extract to read documentation pages, articles, or any web page content. " +
+      "After calling web_extract, summarize the key findings for the user.",
     parameters: Type.Object({
       url: Type.String({ description: "The URL to extract content from" }),
     }),

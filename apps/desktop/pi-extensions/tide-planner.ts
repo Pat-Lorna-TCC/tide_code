@@ -102,11 +102,18 @@ function listPlans(workspaceRoot: string): Plan[] {
 // ── Extension ───────────────────────────────────────────────
 
 export default function tidePlanner(pi: ExtensionAPI) {
+  let isOrchestrated = false;
+
   // ── Context Injection ───────────────────────────────────
   // Inject active plan context + completed step summaries so the agent
   // knows what has been done and what remains.
   pi.on("before_agent_start", async (event, ctx) => {
     const userMessage = event.prompt || "";
+
+    // Skip planning context injection during orchestration —
+    // the orchestrator already provides curated context in each step prompt
+    isOrchestrated = userMessage.trimStart().startsWith("[tide:orchestrated]");
+    if (isOrchestrated) return;
 
     // Build context from active plan (if any)
     const plans = listPlans(ctx.cwd);
@@ -209,9 +216,16 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_create",
+    label: "Create Plan",
     description:
       "Create a structured implementation plan for a complex task. " +
       "The plan is saved to .tide/plans/ and displayed in the Plan tab.",
+    promptSnippet: "Create a structured implementation plan with steps",
+    promptGuidelines: [
+      "Each step should be atomic — small enough for a single agent to execute with only the step description",
+      "Include specific file paths, not vague references like 'update the config'",
+      "Set dependencies between steps when order matters",
+    ],
     parameters: Type.Object({
       title: Type.String({ description: "Plan title" }),
       description: Type.String({ description: "Brief description of the overall goal" }),
@@ -282,11 +296,18 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_clarify",
+    label: "Clarify Plan",
     description:
       "Ask the user clarifying questions before creating a plan. " +
       "Each question has suggested answers the user can pick from, plus optional free-text input. " +
       "This tool blocks until the user responds. Use when you need to narrow down scope, " +
       "technology choices, or approach before planning.",
+    promptSnippet: "Ask clarifying questions before planning (blocks for user input)",
+    promptGuidelines: [
+      "Each question should have 2-4 concrete suggested answers",
+      "Use specific question IDs like 'auth_approach' or 'test_strategy'",
+      "Only ask questions that meaningfully affect the plan — skip obvious ones",
+    ],
     parameters: Type.Object({
       questions: Type.Array(
         Type.Object({
@@ -306,6 +327,13 @@ export default function tidePlanner(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      // During orchestration, skip clarification — proceed with best judgment
+      if (isOrchestrated) {
+        return {
+          content: [{ type: "text" as const, text: "Skipping clarification (orchestrated mode) — proceed with best judgment." }],
+        };
+      }
+
       // Broadcast full question set to frontend for rendering
       ctx.ui.setStatus("clarify", JSON.stringify({ questions: params.questions }));
 
@@ -322,12 +350,13 @@ export default function tidePlanner(pi: ExtensionAPI) {
       } catch { /* use default */ }
 
       // Block until user responds, with optional timeout to prevent orchestration hangs
+      const TIMEOUT_SENTINEL = "__CLARIFY_TIMEOUT__";
       let response: string | undefined;
       const inputPromise = ctx.ui.input("Plan Clarification", "Waiting for your answers...");
 
       if (timeoutSecs > 0) {
-        const timeoutPromise = new Promise<undefined>((resolve) =>
-          setTimeout(() => resolve(undefined), timeoutSecs * 1000),
+        const timeoutPromise = new Promise<string>((resolve) =>
+          setTimeout(() => resolve(TIMEOUT_SENTINEL), timeoutSecs * 1000),
         );
         response = await Promise.race([inputPromise, timeoutPromise]);
       } else {
@@ -337,12 +366,15 @@ export default function tidePlanner(pi: ExtensionAPI) {
       // Clear the clarify status
       ctx.ui.setStatus("clarify", undefined);
 
-      if (!response) {
-        const reason = timeoutSecs > 0
-          ? `User did not respond within ${timeoutSecs}s — proceeding with best judgment.`
-          : "User skipped clarification.";
+      if (response === TIMEOUT_SENTINEL) {
         return {
-          content: [{ type: "text" as const, text: reason }],
+          content: [{ type: "text" as const, text: `Clarification timed out after ${timeoutSecs}s — proceeding with best judgment.` }],
+        };
+      }
+
+      if (!response) {
+        return {
+          content: [{ type: "text" as const, text: "User skipped clarification — proceeding with best judgment." }],
         };
       }
 
@@ -377,8 +409,10 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_update",
+    label: "Update Step",
     description:
       "Update the status of a plan step. Use this to mark steps as in_progress, completed, or skipped.",
+    promptSnippet: "Update a plan step status (pending/in_progress/completed/skipped)",
     parameters: Type.Object({
       planId: Type.String({ description: "Plan ID" }),
       stepId: Type.String({ description: "Step ID (e.g. step-1)" }),
@@ -445,10 +479,12 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_step_summary",
+    label: "Step Summary",
     description:
       "Record a summary of what was accomplished in a plan step. " +
       "This summary is passed as context to agents working on subsequent steps, " +
       "so they understand what has been done without needing full conversation history.",
+    promptSnippet: "Record what was done in a plan step (for cross-step context)",
     parameters: Type.Object({
       planId: Type.String({ description: "Plan ID" }),
       stepId: Type.String({ description: "Step ID (e.g. step-1)" }),
@@ -495,11 +531,17 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_revise",
+    label: "Revise Plan",
     description:
       "Revise an existing plan by replacing its title, description, and/or steps. " +
       "Use this instead of tide_plan_create when the user asks to enhance, refine, " +
       "edit, or redo a plan that already exists. Preserves the plan ID, slug, and " +
       "any step summaries/completion status where step titles match.",
+    promptSnippet: "Revise an existing plan (preserves ID and completed step state)",
+    promptGuidelines: [
+      "Use this instead of tide_plan_create when refining an existing plan",
+      "Step titles that match existing steps will preserve their completion status and summaries",
+    ],
     parameters: Type.Object({
       planId: Type.String({ description: "ID of the plan to revise" }),
       title: Type.Optional(Type.String({ description: "New plan title (omit to keep existing)" })),
@@ -582,7 +624,9 @@ export default function tidePlanner(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "tide_plan_list",
+    label: "List Plans",
     description: "List all plans in the workspace.",
+    promptSnippet: "List all plans in the workspace",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const plans = listPlans(ctx.cwd);

@@ -226,6 +226,42 @@
   background: rgba(247, 118, 142, 0.12);
 }
 
+.pasteChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  margin: 0 1px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: rgba(133, 133, 133, 0.08);
+  border: 1px solid rgba(133, 133, 133, 0.2);
+  border-radius: 3px;
+  vertical-align: baseline;
+  user-select: all;
+  cursor: default;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pasteChipExpand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: rgba(133, 133, 133, 0.6);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.pasteChipExpand:hover {
+  color: var(--text-primary);
+}
+
 /* Toolbar row */
 .composerToolbar {
   position: absolute;

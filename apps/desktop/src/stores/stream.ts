@@ -27,6 +27,8 @@ export interface AssistantMessage {
   timestamp: number;
   streaming: boolean;
   modelName?: string;
+  executionStatus?: "analyzed" | "executed_no_changes" | "changed_files";
+  changedFiles?: string[];
 }
 
 export interface SystemMessage {
@@ -67,6 +69,12 @@ export interface AvailableModel {
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+export interface PiCommand {
+  name: string;
+  description?: string;
+  type?: string;
+}
+
 export interface SessionStats {
   totalTokens?: number;
   inputTokens?: number;
@@ -79,7 +87,7 @@ export interface SessionStats {
 
 // ── Store ───────────────────────────────────────────────────
 
-export type SessionStatus = "idle" | "loading" | "active" | "switching";
+export type SessionStatus = "idle" | "loading" | "active";
 
 interface StreamState {
   messages: ChatMessage[];
@@ -100,6 +108,7 @@ interface StreamState {
   contextWindow: number;
   hasAutoTitled: boolean;
   sessionStatus: SessionStatus;
+  piCommands: PiCommand[];
   _agentStartMsgCount: number;
   _emptyRetryCount: number;
 
@@ -127,9 +136,21 @@ function generateSessionTitle(text: string): string {
 }
 
 let msgCounter = 0;
-let hasLoggedFirstDelta = false;
 function nextId() {
   return `msg-${++msgCounter}-${Date.now()}`;
+}
+
+function extractChangedFilePath(toolName: string, argsJson?: string): string | undefined {
+  if (!argsJson) return undefined;
+  let parsed: any;
+  try { parsed = JSON.parse(argsJson); } catch { return undefined; }
+
+  const lower = toolName.toLowerCase();
+  if (lower.includes("write") || lower.includes("edit") || lower.includes("read")) {
+    const p = parsed?.path;
+    return typeof p === "string" && p.trim().length > 0 ? p : undefined;
+  }
+  return undefined;
 }
 
 export const useStreamStore = create<StreamState>((set, get) => ({
@@ -151,6 +172,7 @@ export const useStreamStore = create<StreamState>((set, get) => ({
   contextWindow: 200000,
   hasAutoTitled: false,
   sessionStatus: "idle" as SessionStatus,
+  piCommands: [],
   _agentStartMsgCount: 0,
   _emptyRetryCount: 0,
 
@@ -171,15 +193,13 @@ export const useStreamStore = create<StreamState>((set, get) => ({
   clearMessages: () => set({ messages: [], hasAutoTitled: false }),
 
   handlePiEvent: (event: PiEvent) => {
-    // Top-level event trace for debugging router ↔ model sync
-    if (event.type === "model_select" || event.type === "agent_start" || event.type === "agent_end" || event.type === "message_end") {
-      console.debug(`[Tide:event] ${event.type}`, event.type === "model_select" ? event : "");
+    // Event trace (only when devtools are open)
+    if (event.type === "model_select") {
+      console.debug(`[Tide:event] ${event.type}`, event);
     }
 
     switch (event.type) {
       case "agent_start": {
-        console.debug("[Tide:event] agent_start — msgCount:", get().messages.length, "model:", get().modelName, "retryCount:", get()._emptyRetryCount);
-        hasLoggedFirstDelta = false;
         const thinkingId = nextId();
         set((state) => ({
           agentActive: true,
@@ -203,11 +223,17 @@ export const useStreamStore = create<StreamState>((set, get) => ({
         // Build cleaned messages: remove thinking, mark streaming done
         const cleaned = get().messages
           .filter((m) => m.role !== "thinking")
-          .map((m) =>
-            m.role === "assistant" && m.streaming
-              ? { ...m, streaming: false }
-              : m,
-          );
+          .map((m) => {
+            if (m.role === "assistant") {
+              const am = m as AssistantMessage;
+              return {
+                ...am,
+                streaming: false,
+                executionStatus: am.executionStatus ?? "analyzed",
+              };
+            }
+            return m;
+          });
 
         // Check if we got a real response during this agent turn
         const newMsgs = cleaned.slice(startCount);
@@ -218,7 +244,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
         const hasErrorMsg = newMsgs.some(
           (m) => m.role === "system" && (m as SystemMessage).icon === "error"
         );
-        console.debug("[Tide:event] agent_end — msgCount:", cleaned.length, "hasText:", hasAssistantText, "hasTools:", hasToolCalls, "hasError:", hasErrorMsg, "retryCount:", retryCount);
 
         if (!hasAssistantText && !hasToolCalls && !hasErrorMsg && startCount > 0 && retryCount < 1) {
           // Empty response on first attempt — auto-retry once
@@ -293,16 +318,31 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       case "message_update": {
         const raw = event as any;
         const ame = raw.assistantMessageEvent;
+
+        // Handle thinking_delta — keep thinking indicator visible (no text to display)
+        if (ame?.type === "thinking_start" || ame?.type === "thinking_delta" || ame?.type === "thinking_end") {
+          // Thinking is happening — ensure thinking indicator is shown
+          if (ame.type === "thinking_start") {
+            set((state) => {
+              const hasThinking = state.messages.some(m => m.role === "thinking");
+              if (hasThinking) return state;
+              return { messages: [...state.messages, { role: "thinking" as const, id: nextId(), timestamp: Date.now() }] };
+            });
+          }
+          break;
+        }
+
+        // Handle toolcall_delta — tool args streaming (informational, tool_execution_start handles UI)
+        if (ame?.type === "toolcall_start" || ame?.type === "toolcall_delta" || ame?.type === "toolcall_end") {
+          break;
+        }
+
         // Try multiple possible shapes for text content
         const delta = ame?.type === "text_delta" ? (ame.delta ?? ame.text)
           : ame?.type === "content_block_delta" ? (ame.delta?.text ?? ame.text)
           : ame?.text ?? ame?.delta
           ?? raw.text ?? raw.delta ?? raw.content ?? null;
         if (typeof delta === "string") {
-          if (!hasLoggedFirstDelta) {
-            hasLoggedFirstDelta = true;
-            console.debug(`[Tide:event] message_update — first delta, len=${delta.length}, type=${ame?.type || "raw"}`);
-          }
           set((state) => {
             const msgs = state.messages;
             const lastMsg = msgs[msgs.length - 1];
@@ -369,29 +409,56 @@ export const useStreamStore = create<StreamState>((set, get) => ({
         const e = event as any;
         const callId = e.toolCallId || e.tool_call_id || "";
         const now = Date.now();
+        const toolName = String(e.toolName || e.tool_name || "");
+        const resultJson = e.result ? JSON.stringify(e.result) : e.resultJson;
 
-        set((state) => ({
-          messages: state.messages.map((m) =>
+        set((state) => {
+          const updatedMessages = state.messages.map((m) =>
             m.role === "tool_call" && m.toolCallId === callId
               ? {
                   ...m,
                   status: (e.error ? "error" : "completed") as "error" | "completed",
                   completedAt: now,
                   durationMs: now - m.startedAt,
-                  resultJson: e.result ? JSON.stringify(e.result) : e.resultJson,
+                  resultJson,
                   error: e.error,
                 }
               : m,
-          ),
-        }));
+          );
+
+          // Attach execution summary to the latest assistant message for better UX clarity
+          const assistantIdx = [...updatedMessages].reverse().findIndex((m) => m.role === "assistant");
+          if (assistantIdx !== -1) {
+            const realIdx = updatedMessages.length - 1 - assistantIdx;
+            const assistant = updatedMessages[realIdx] as AssistantMessage;
+            const lower = toolName.toLowerCase();
+            const isFileMutating = ["write", "edit", "create", "delete", "rename", "move"].some((t) => lower.includes(t));
+            const didSucceed = !e.error;
+
+            const changedPath = extractChangedFilePath(toolName, (updatedMessages.find((m) => m.role === "tool_call" && (m as ToolCallMessage).toolCallId === callId) as ToolCallMessage | undefined)?.argsJson);
+            const prevFiles = assistant.changedFiles ?? [];
+            const nextFiles = changedPath && !prevFiles.includes(changedPath) ? [...prevFiles, changedPath] : prevFiles;
+
+            const nextStatus: AssistantMessage["executionStatus"] = didSucceed
+              ? (isFileMutating ? "changed_files" : "executed_no_changes")
+              : assistant.executionStatus ?? "analyzed";
+
+            updatedMessages[realIdx] = {
+              ...assistant,
+              executionStatus: nextStatus,
+              changedFiles: nextFiles,
+            };
+          }
+
+          return { messages: updatedMessages };
+        });
 
         useLogStore.getState().completeToolLog(callId, {
-          resultJson: e.result ? JSON.stringify(e.result) : e.resultJson,
+          resultJson,
           error: e.error,
         });
 
         // Refresh file tree when file-modifying tools complete
-        const toolName = e.toolName || e.tool_name || "";
         if (["write", "edit", "create", "delete", "rename", "move"].some(t => toolName.toLowerCase().includes(t))) {
           useWorkspaceStore.getState().refreshFileTree();
         }
@@ -421,7 +488,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
 
           case "get_state": {
             const updates: Partial<StreamState> = {};
-            console.debug("[Tide:response] get_state — model:", e.data?.model?.id || e.data?.model, "session:", e.data?.sessionFile || e.data?.sessionId);
 
             if (e.data?.model) {
               const m = e.data.model;
@@ -435,7 +501,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
               if (typeof m === "object" && m.contextWindow) {
                 updates.contextWindow = Number(m.contextWindow);
               }
-              console.debug(`[Tide] Model: ${provider}/${id} "${name}" (ctx: ${(updates as any).contextWindow ?? "unchanged"})`);
             }
             if (e.data?.thinkingLevel) {
               updates.thinkingLevel = e.data.thinkingLevel as ThinkingLevel;
@@ -450,8 +515,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
               if (lastSlash > 0) {
                 updates.sessionDir = sf.substring(0, lastSlash);
               }
-              console.debug(`[Tide] Session: ${sf}`);
-            } else {
             }
             if (e.data?.isCompacting != null) updates.isCompacting = e.data.isCompacting;
 
@@ -475,7 +538,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
           }
 
           case "set_model": {
-            console.debug("[Tide:response] set_model — success:", e.success, "data:", e.data);
             if (e.success && e.data) {
               const m = e.data;
               const name = typeof m === "string" ? m : String(m.name || m.id || "unknown");
@@ -496,7 +558,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
                   useContextStore.getState().updateFromPiState(stats.totalTokens, updates.contextWindow);
                 }
               }
-              console.log(`[Tide] Model switched: ${prevProvider}/${prevModel} → ${provider}/${id}`);
               // Insert system message in chat when model changes
               if (prevModel && prevModel !== name) {
                 set((state) => ({
@@ -519,7 +580,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
           }
 
           case "set_thinking_level": {
-            console.debug("[Tide] Thinking level updated:", e.data);
             if (e.success && e.data?.level) {
               set({ thinkingLevel: e.data.level as ThinkingLevel });
             }
@@ -558,6 +618,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
           }
 
           case "new_session": {
+            if (e.data?.cancelled) {
+              console.warn("[Tide] new_session was cancelled by Pi");
+              break;
+            }
             if (e.success) {
               // During orchestration, don't clear messages — the orchestrator
               // creates fresh sessions for each build step internally.
@@ -587,6 +651,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
           }
 
           case "switch_session": {
+            if (e.data?.cancelled) {
+              console.warn("[Tide] switch_session was cancelled by Pi");
+              break;
+            }
             if (e.success) {
               set({
                 messages: [],
@@ -608,7 +676,10 @@ export const useStreamStore = create<StreamState>((set, get) => ({
             // Restore chat history from Pi's session
             if (e.success && e.data) {
               const rawMessages = Array.isArray(e.data) ? e.data : (e.data.messages || []);
-              if (rawMessages.length > 0 && get().messages.length === 0) {
+              console.debug(`[Tide] get_messages: ${rawMessages.length} raw messages, ${get().messages.length} current messages`);
+              // Only skip restoration if we already have user/assistant messages (not just system messages)
+              const hasRealMessages = get().messages.some(m => m.role === "user" || m.role === "assistant");
+              if (rawMessages.length > 0 && !hasRealMessages) {
                 const restored: ChatMessage[] = [];
                 for (const msg of rawMessages) {
                   const role = msg.role || msg.type;
@@ -668,6 +739,72 @@ export const useStreamStore = create<StreamState>((set, get) => ({
             break;
           }
 
+          case "fork": {
+            if (e.data?.cancelled) {
+              console.warn("[Tide] fork was cancelled by Pi");
+              break;
+            }
+            if (e.success) {
+              set({
+                sessionId: e.data?.sessionId || e.data?.sessionPath || "",
+                sessionName: e.data?.sessionName || "",
+              });
+              getMessages().catch(() => {});
+              getSessionStats().catch(() => {});
+            }
+            break;
+          }
+
+          case "cycle_model": {
+            if (e.success && e.data) {
+              const m = e.data;
+              const name = String(m.name || m.id || "unknown");
+              const provider = String(m.provider || "");
+              const id = String(m.id || "");
+              set({ modelName: name, modelProvider: provider, modelId: id });
+              if (m.contextWindow) {
+                set({ contextWindow: Number(m.contextWindow) });
+              }
+            }
+            break;
+          }
+
+          case "cycle_thinking_level": {
+            if (e.success && e.data?.level) {
+              set({ thinkingLevel: e.data.level as ThinkingLevel });
+            }
+            break;
+          }
+
+          case "abort":
+          case "retry": {
+            // Informational — agent_start/end will handle UI state
+            break;
+          }
+
+          case "get_commands": {
+            // Pi returns { data: { commands: [...] } }
+            const cmdList = e.data?.commands ?? e.data;
+            if (e.success && Array.isArray(cmdList)) {
+              const cmds: PiCommand[] = cmdList.map((c: any) => ({
+                name: String(c.name || ""),
+                description: c.description ? String(c.description) : undefined,
+                type: c.source ? String(c.source) : undefined,
+              })).filter((c: PiCommand) => c.name);
+              set({ piCommands: cmds });
+              console.log(`[Tide] Loaded ${cmds.length} Pi commands/skills`);
+            }
+            break;
+          }
+
+          case "bash":
+          case "export_html":
+          case "get_last_assistant_text":
+          case "get_fork_messages": {
+            // Handled by specific UI features if needed; no store updates required
+            break;
+          }
+
           default: {
             // Fallback: try to extract model info from any response with model data
             if (e.data?.model && !cmd) {
@@ -699,7 +836,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
         // Some models don't stream text_delta — the full text arrives here.
         // If text was already streamed via message_update, skip to avoid duplication.
         const endMsg = (event as any).message;
-        console.debug("[Tide:event] message_end — hasMessage:", !!endMsg, "role:", endMsg?.role, "stopReason:", endMsg?.stopReason);
 
         // Surface API errors from the model (e.g. OpenAI 404, rate limits)
         if (endMsg?.stopReason === "error" && endMsg?.errorMessage) {
@@ -825,7 +961,6 @@ export const useStreamStore = create<StreamState>((set, get) => ({
           const updates: Partial<StreamState> = { modelName: name, modelProvider: provider, modelId: id };
           if (model.contextWindow) updates.contextWindow = Number(model.contextWindow);
           set(updates);
-          console.debug(`[Tide] model_select: ${prevModel} → ${provider}/${id} "${name}"`);
 
           // Fix 1: Update modelName on any currently-streaming assistant message
           // so the badge reflects the routed model, not the old one
@@ -865,6 +1000,19 @@ export const useStreamStore = create<StreamState>((set, get) => ({
       }
 
       case "tool_execution_update": {
+        const e = event as any;
+        const callId = e.toolCallId || e.tool_call_id || "";
+        const partialResult = e.content || e.text || e.output || e.data || null;
+        if (callId && partialResult) {
+          const text = typeof partialResult === "string" ? partialResult : JSON.stringify(partialResult);
+          set((state) => ({
+            messages: state.messages.map((m) =>
+              m.role === "tool_call" && m.toolCallId === callId
+                ? { ...m, resultJson: text }
+                : m,
+            ),
+          }));
+        }
         break;
       }
 

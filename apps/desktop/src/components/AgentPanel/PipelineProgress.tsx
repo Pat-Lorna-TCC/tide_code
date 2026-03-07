@@ -1,4 +1,5 @@
 import { useOrchestrationStore, type OrcPhase } from "../../stores/orchestrationStore";
+import { cancelOrchestration } from "../../lib/ipc";
 
 const PHASES: { key: OrcPhase; label: string }[] = [
   { key: "routing", label: "Route" },
@@ -20,6 +21,7 @@ export function PipelineProgress() {
 
   const activeIdx = phaseIndex(phase);
   const isFailed = phase === "failed";
+  const isActive = phase !== "complete" && phase !== "failed";
 
   return (
     <div style={s.container}>
@@ -67,6 +69,15 @@ export function PipelineProgress() {
             </div>
           );
         })}
+        {isActive && (
+          <button
+            style={s.cancelBtn}
+            onClick={() => cancelOrchestration().catch(console.error)}
+            title="Cancel orchestration"
+          >
+            Cancel
+          </button>
+        )}
       </div>
       {isFailed && message && (
         <div style={s.errorMsg}>{message}</div>
@@ -130,6 +141,18 @@ const s: Record<string, React.CSSProperties> = {
   },
   labelDone: {
     color: "var(--success, #4ade80)",
+  },
+  cancelBtn: {
+    marginLeft: "auto",
+    padding: "2px 8px",
+    fontSize: 10,
+    fontFamily: "var(--font-ui)",
+    color: "var(--text-secondary)",
+    background: "transparent",
+    border: "1px solid var(--border)",
+    borderRadius: 4,
+    cursor: "pointer",
+    whiteSpace: "nowrap" as const,
   },
   errorMsg: {
     fontFamily: "var(--font-ui)",

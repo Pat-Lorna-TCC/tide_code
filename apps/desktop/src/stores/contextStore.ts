@@ -84,11 +84,22 @@ export const useContextStore = create<ContextState>((set) => ({
   },
 
   refreshItems: async () => {
-    // Context items not yet exposed by Pi
+    // Refresh context breakdown from Pi state
+    try {
+      await getPiState();
+    } catch {
+      // Pi not connected yet
+    }
   },
 
-  togglePin: async (_id: string) => {
-    // Region-based pinning handled via tide_tags tool (TIDE-062)
+  togglePin: async (id: string) => {
+    // Delegate to region tag store — pinning is managed through tags
+    const { useRegionTagStore } = await import("./regionTagStore");
+    const tagStore = useRegionTagStore.getState();
+    const tag = tagStore.tags.get(id);
+    if (tag) {
+      tagStore.togglePin(id);
+    }
   },
 
   openInspector: () => set({ inspectorOpen: true }),
